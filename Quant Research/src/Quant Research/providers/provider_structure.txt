@@ -1,0 +1,12 @@
+src/
+└── quant_research/
+    ├── providers/
+    │   ├── __init__.py                  # Package exports and version info
+    │   ├── base.py                      # BaseProvider abstract interface
+    │   ├── provider_factory.py          # Factory and registration system
+    │   ├── connection_manager.py        # Async connection pooling and management
+    │   │
+    │   ├── crypto_ccxt.py               # CCXT provider implementation
+    │   ├── equities_yf.py               # Yahoo Finance provider
+    │   ├── onchain.py                   # Blockchain data provider
+    │   └── sentiment_twitter.py         # Twitter sentiment provider
