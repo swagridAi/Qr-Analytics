@@ -1,0 +1,329 @@
+# Sentiment Alpha Module
+
+## Overview
+
+The Sentiment Alpha module extracts trading signals from social media sentiment data. It implements transformer-based NLP to analyze text sentiment and converts this into tradeable signals that can be used by the backtesting engine.
+
+This module is part of the analytics engine and follows the standard interface pattern, exposing a `generate_signal(df, **params)` function that processes input data and produces standardized signal outputs.
+
+## Key Features
+
+- Transformer-based sentiment analysis of social media text
+- Time-series feature engineering from raw sentiment data
+- Correlation analysis with price movements
+- Information Coefficient (IC) calculations for feature selection
+- Signal generation with configurable thresholds
+- Visualization tools for performance analysis
+
+## Architecture
+
+![Sentiment Alpha Architecture](../assets/sentiment_alpha_architecture.png)
+
+The module is structured into specialized classes with clear responsibilities:
+
+| Class | Purpose |
+|-------|---------|
+| `SentimentAnalyzer` | Extracts sentiment from text using transformer models |
+| `TextPreprocessor` | Cleans and normalizes raw social media text |
+| `SentimentFeatureEngine` | Creates time-series features from sentiment data |
+| `PerformanceAnalyzer` | Evaluates the predictive power of sentiment features |
+| `SignalGenerator` | Converts sentiment features into trading signals |
+| `SentimentConfig` | Centralizes configuration parameters |
+
+## Installation
+
+The Sentiment Alpha module is included in the main project and requires the following dependencies:
+
+```toml
+[dependencies]
+transformers = "^4.28.0"
+torch = "^2.0.0"
+pandas = "^2.0.0"
+numpy = "^1.24.0"
+matplotlib = "^3.7.0"
+seaborn = "^0.12.0"
+scipy = "^1.10.0"
+statsmodels = "^0.14.0"
+pyarrow = "^12.0.0"
+```
+
+## Usage
+
+### Basic Usage
+
+```python
+from quant_research.analytics.sentiment_alpha.sentiment_model import generate_signal
+
+# Load tweet data
+tweet_df = pd.read_parquet("data/tweets.parquet")
+
+# Generate signals
+signals_df = generate_signal(tweet_df)
+
+# Signals are also saved to "data/signals.parquet"
+```
+
+### With Price Data for Correlation Analysis
+
+```python
+# Load tweet data and price data
+tweet_df = pd.read_parquet("data/tweets.parquet")
+price_df = pd.read_parquet("data/prices.parquet")
+
+# Generate signals with correlation analysis
+signals_df = generate_signal(
+    tweet_df, 
+    price_df, 
+    output_dir="data/plots/sentiment"
+)
+```
+
+### Custom Configuration
+
+```python
+# Generate signals with custom parameters
+signals_df = generate_signal(
+    tweet_df,
+    price_df,
+    text_col="content",           # Column containing text
+    time_col="created_at",        # Column containing timestamps
+    model_name="finbert/finbert", # Alternative sentiment model
+    window_sizes=[1, 2, 3, 7],    # Custom feature windows
+    output_dir="reports/sentiment_analysis",
+    signal_output_path="results/sentiment_signals.parquet"
+)
+```
+
+## API Reference
+
+### Main Function
+
+```python
+def generate_signal(
+    df: pd.DataFrame, 
+    price_df: pd.DataFrame = None, 
+    **params
+) -> pd.DataFrame
+```
+
+Generates sentiment-based trading signals from social media data.
+
+**Parameters:**
+
+- `df`: DataFrame containing social media data
+- `price_df`: Optional DataFrame containing price data for correlation analysis
+- `params`: Additional parameters:
+  - `text_col`: Column name with text content (default: "text")
+  - `time_col`: Column name with timestamps (default: "timestamp")
+  - `model_name`: HuggingFace model name (default: "finiteautomata/bertweet-base-sentiment-analysis")
+  - `window_sizes`: List of window sizes for features (default: [1, 3, 5, 7, 14])
+  - `output_dir`: Directory to save analysis plots (default: None)
+  - `signal_output_path`: Path for signal output (default: "data/signals.parquet")
+  - `save_signals`: Whether to save signals (default: True)
+
+**Returns:**
+
+- DataFrame containing features and signals
+
+### Configuration
+
+```python
+@dataclass
+class SentimentConfig:
+    model_name: str = DEFAULT_MODEL_NAME
+    batch_size: int = 16
+    window_sizes: List[int] = None
+    zscore_threshold: float = 1.5
+    signal_threshold: float = 0.5
+    output_dir: Optional[str] = None
+    signal_output_path: str = "data/signals.parquet"
+```
+
+## Data Requirements
+
+### Input Data Format
+
+The module expects a DataFrame with at least:
+
+1. A text column containing social media posts
+2. A timestamp column with post dates/times
+
+Example format:
+
+```
++---------------------+----------------------------------------------+
+| timestamp           | text                                         |
++---------------------+----------------------------------------------+
+| 2023-01-01 12:30:45 | $BTC looking bullish, strong support at 40k! |
+| 2023-01-01 12:45:22 | Selling all my tech stocks, market crash... |
+| ...                 | ...                                          |
++---------------------+----------------------------------------------+
+```
+
+### Price Data Format (Optional)
+
+If price data is provided, it should contain at least:
+
+1. A date column
+2. A price column (and/or a returns column)
+
+Example format:
+
+```
++------------+----------+----------+
+| date       | close    | returns  |
++------------+----------+----------+
+| 2023-01-01 | 150.25   | 0.015    |
+| 2023-01-02 | 149.50   | -0.005   |
+| ...        | ...      | ...      |
++------------+----------+----------+
+```
+
+## Output Signal Format
+
+The module produces a DataFrame with sentiment features and signals, and also saves standardized `Signal` objects to the specified output path.
+
+Signal object structure:
+
+```python
+Signal(
+    timestamp=datetime.datetime(2023, 1, 1),
+    source="sentiment_alpha",
+    signal_value=1.0,  # 1 (buy), -1 (sell), or 0 (neutral)
+    confidence=0.75,   # Confidence score between 0-1
+    metadata={
+        "sentiment_mean": 0.65,
+        "tweet_count": 120
+    }
+)
+```
+
+## Feature Engineering
+
+The module generates multiple time-series features from raw sentiment data:
+
+| Feature Type | Description | Formula |
+|--------------|-------------|---------|
+| Simple Moving Average | Average sentiment over window | SMA(n) |
+| Standard Deviation | Sentiment volatility | StdDev(n) |
+| Z-Score | Normalized deviation from mean | (Value - SMA) / StdDev |
+| Rate of Change | Percent change over window | (Value / Value_n) - 1 |
+| Exponential Moving Average | Weighted average with more weight on recent data | EMA(n) |
+| Momentum | Difference between current and past value | Value - Value_n |
+
+## Correlation Analysis
+
+When price data is provided, the module performs:
+
+1. **Lag correlation analysis**: Identifies lead/lag relationships between sentiment and returns
+2. **Information Coefficient calculation**: Measures the predictive power of each feature
+3. **Statistical significance testing**: Determines which features have statistically significant predictive power
+
+The results are visualized as plots saved to the specified output directory.
+
+## Signal Generation
+
+Signals are generated using the following process:
+
+1. Select the best-performing features based on IC analysis
+2. Apply thresholds to each feature (default: ±1.5 standard deviations)
+3. Generate individual signals for each feature (-1, 0, 1)
+4. Combine signals with equal weighting (or custom weights)
+5. Apply threshold to composite score to determine final signal
+
+## Performance Considerations
+
+- **Model loading**: Transformer models can be memory-intensive; ensure sufficient RAM
+- **Batch processing**: Large volumes of text are processed in batches to manage memory
+- **GPU acceleration**: Automatically uses CUDA if available for faster inference
+- **Data volume**: Processing speed scales with the number of social media posts
+
+## Integration with Backtesting
+
+The signals generated by this module are automatically saved to the signal store, making them available to the backtesting engine for strategy simulation.
+
+Example backtest usage:
+
+```python
+from quant_research.backtest.strategies.adaptive_regime import AdaptiveRegime
+
+# Create strategy using sentiment signals
+strategy = AdaptiveRegime(
+    signal_source="sentiment_alpha",
+    lookback_days=5,
+    confidence_threshold=0.6
+)
+
+# Run backtest
+results = strategy.run_backtest(
+    start_date="2023-01-01",
+    end_date="2023-06-30"
+)
+```
+
+## Dashboard Integration
+
+The sentiment signals and features are visualized in the dashboard via the `dashboard/components/sentiment_view.py` component.
+
+## Advanced Usage
+
+### Custom Sentiment Models
+
+You can use any HuggingFace sentiment model with the appropriate output format:
+
+```python
+# Using FinBERT for financial sentiment analysis
+signals_df = generate_signal(
+    tweet_df,
+    model_name="ProsusAI/finbert"
+)
+```
+
+### Custom Thresholds
+
+You can specify custom thresholds for signal generation:
+
+```python
+from quant_research.analytics.sentiment_alpha.sentiment_model import (
+    SignalGenerator, SentimentConfig
+)
+
+# Create custom configuration
+config = SentimentConfig(
+    zscore_threshold=2.0,    # More conservative signals (2 std dev)
+    signal_threshold=0.7     # Higher threshold for composite signals
+)
+
+# Generate signals with custom thresholds
+generator = SignalGenerator(config)
+signals_df = generator.generate_signals(features_df, feature_cols)
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Missing text data**: Ensure your DataFrame contains the expected text column
+2. **Memory errors**: Try reducing batch_size or using a smaller model
+3. **Empty signals**: Check if sentiment extraction is working properly
+4. **GPU errors**: Fall back to CPU with `os.environ["CUDA_VISIBLE_DEVICES"] = ""`
+
+### Logging
+
+The module uses Python's logging system with the logger name "quant_research.analytics.sentiment_alpha". Adjust log levels to get more detailed information:
+
+```python
+import logging
+logging.getLogger("quant_research.analytics.sentiment_alpha").setLevel(logging.DEBUG)
+```
+
+## Research Notes
+
+The effectiveness of sentiment analysis for trading signals depends on various factors:
+
+1. **Data source quality**: Twitter vs. specialized financial forums
+2. **Signal timing**: Sentiment often has complex lead/lag relationships with price
+3. **Market regime**: Sentiment signals may perform differently in various market conditions
+4. **Asset class**: More effective for assets with high social media coverage
+
+For best results, combine sentiment signals with other alpha factors and adapt thresholds based on historical performance.

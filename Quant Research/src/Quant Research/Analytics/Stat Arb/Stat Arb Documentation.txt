@@ -1,0 +1,458 @@
+# Statistical Arbitrage Signals Module
+
+## Overview
+
+The Statistical Arbitrage Signals module implements methods for identifying and trading statistical relationships between financial instruments. The module is composed of two primary components:
+
+1. **Cointegration Analysis**: Detects long-term equilibrium relationships between pairs of assets
+2. **Z-Score Signal Generation**: Identifies temporary deviations from equilibrium and generates trading signals
+
+This documentation covers the purpose, implementation details, and usage patterns for both components.
+
+## Table of Contents
+
+- [Core Concepts](#core-concepts)
+- [Cointegration Module](#cointegration-module)
+- [Z-Score Module](#z-score-module)
+- [Implementation Examples](#implementation-examples)
+- [Advanced Configurations](#advanced-configurations)
+- [Performance Considerations](#performance-considerations)
+
+## Core Concepts
+
+### Statistical Arbitrage
+
+Statistical arbitrage exploits temporary mispricings between related assets by:
+
+1. Identifying assets with a statistical relationship (cointegration)
+2. Calculating the "fair" relationship between them (hedge ratio)
+3. Measuring deviations from this relationship (z-scores)
+4. Trading when deviations become extreme, expecting reversion to equilibrium
+
+### Cointegration
+
+Two assets are cointegrated when, despite both being non-stationary (trending), a specific linear combination of them creates a stationary (mean-reverting) series. This represents a long-term equilibrium relationship that tends to persist even when individual asset prices move significantly.
+
+### Z-Scores
+
+Z-scores measure how many standard deviations a spread is away from its mean. For example:
+- Z = +2: The spread is 2 standard deviations above its mean (potential short opportunity)
+- Z = -2: The spread is 2 standard deviations below its mean (potential long opportunity)
+- Z ≈ 0: The spread is close to equilibrium
+
+## Cointegration Module
+
+The `cointegration.py` module provides functionality for testing pairs of assets for cointegration and generating trading signals based on these relationships.
+
+### Key Components
+
+#### Data Structures
+
+- **`CointegrationResult`**: Stores the results of cointegration testing, including:
+  - Statistical metrics (p-value, t-statistic)
+  - Trading parameters (hedge ratio, half-life)
+  - Spread characteristics (mean, standard deviation)
+
+- **`CointegrationParams`**: Configuration parameters for testing and signal generation:
+  - Statistical thresholds
+  - Signal generation settings
+  - Advanced options
+
+#### Core Functions
+
+```python
+def test_cointegration(
+    asset1_prices: pd.Series, 
+    asset2_prices: pd.Series,
+    params: Optional[CointegrationParams] = None
+) -> CointegrationResult:
+    """
+    Test for cointegration between two price series.
+    
+    Args:
+        asset1_prices: Price series for first asset
+        asset2_prices: Price series for second asset
+        params: Parameters for testing, or None to use defaults
+        
+    Returns:
+        CointegrationResult object with test results
+    """
+```
+
+```python
+def find_cointegrated_pairs(
+    price_df: pd.DataFrame,
+    params: Optional[CointegrationParams] = None
+) -> List[CointegrationResult]:
+    """
+    Find all cointegrated pairs in a universe of assets.
+    
+    Args:
+        price_df: DataFrame with price series for multiple assets (columns)
+        params: Parameters for testing, or None to use defaults
+        
+    Returns:
+        List of CointegrationResult objects for cointegrated pairs
+    """
+```
+
+```python
+def generate_signal(
+    df: pd.DataFrame,
+    asset_pairs: Optional[List[Tuple[str, str]]] = None,
+    params: Optional[CointegrationParams] = None
+) -> pd.DataFrame:
+    """
+    Generate trading signals based on cointegration analysis.
+    
+    Args:
+        df: DataFrame with price data (columns are assets)
+        asset_pairs: List of asset pairs to analyze, or None to test all pairs
+        params: Parameters for testing and signal generation, or None to use defaults
+        
+    Returns:
+        DataFrame with trading signals
+    """
+```
+
+```python
+def run_cointegration_analysis(
+    price_df: pd.DataFrame,
+    output_path: Optional[str] = None,
+    params: Optional[CointegrationParams] = None
+) -> Tuple[pd.DataFrame, List[CointegrationResult]]:
+    """
+    Run complete cointegration analysis and generate signals.
+    
+    Args:
+        price_df: DataFrame with price data
+        output_path: Path to write signals.parquet, or None to skip writing
+        params: Parameters for testing and signal generation, or None to use defaults
+        
+    Returns:
+        Tuple of (signal_df, cointegration_results)
+    """
+```
+
+### Usage Example
+
+```python
+import pandas as pd
+from quant_research.analytics.stat_arb.cointegration import (
+    CointegrationParams, run_cointegration_analysis
+)
+
+# Load price data
+price_df = pd.read_csv('price_data.csv', index_col=0, parse_dates=True)
+
+# Set parameters
+params = CointegrationParams(
+    significance_level=0.05,  # Statistical significance threshold
+    max_half_life=30,         # Maximum mean-reversion period
+    min_half_life=1,          # Minimum mean-reversion period
+    entry_zscore=2.0,         # Z-score threshold for entry
+    exit_zscore=0.5           # Z-score threshold for exit
+)
+
+# Run analysis
+signals, coint_results = run_cointegration_analysis(price_df, params=params)
+
+# Write results to parquet
+signals.to_parquet('signals.parquet')
+```
+
+## Z-Score Module
+
+The `zscore.py` module provides advanced methods for calculating and analyzing z-scores across multiple pairs, with enhanced signal generation capabilities.
+
+### Key Components
+
+#### Data Structures
+
+- **`ZScoreParams`**: Configuration parameters for z-score calculation and signal generation:
+  - Z-score calculation method and window
+  - Signal generation thresholds
+  - Advanced options for normalization and filtering
+
+- **`SpreadAnalysisResult`**: Comprehensive analytics for a spread:
+  - Statistical properties (mean, std, half-life)
+  - Current positioning (z-score)
+  - Historical behavior metrics
+
+#### Core Functions
+
+```python
+def generate_signal(
+    df: pd.DataFrame,
+    pairs: List[Tuple[str, str, float]] = None,  # (asset1, asset2, hedge_ratio)
+    params: Optional[ZScoreParams] = None
+) -> pd.DataFrame:
+    """
+    Generate trading signals based on z-score analysis.
+    
+    Args:
+        df: DataFrame with price data (columns are assets)
+        pairs: List of tuples with (asset1, asset2, hedge_ratio)
+        params: Parameters for z-score calculation and signal generation
+        
+    Returns:
+        DataFrame with trading signals
+    """
+```
+
+```python
+def analyze_spread(
+    df: pd.DataFrame,
+    asset1: str,
+    asset2: str,
+    hedge_ratio: Optional[float] = None,
+    params: Optional[ZScoreParams] = None
+) -> SpreadAnalysisResult:
+    """
+    Analyze a spread between two assets, calculating key metrics.
+    
+    Args:
+        df: DataFrame with price data
+        asset1: First asset in pair
+        asset2: Second asset in pair
+        hedge_ratio: Fixed hedge ratio or None to estimate it
+        params: Parameters for z-score calculation
+        
+    Returns:
+        SpreadAnalysisResult with spread metrics
+    """
+```
+
+### Z-Score Calculation Methods
+
+The module supports multiple z-score calculation approaches:
+
+1. **Rolling Window (`'rolling'`)**: Traditional approach using rolling mean and standard deviation
+2. **Exponential Weighted (`'ewma'`)**: More responsive to recent price changes
+3. **Regime-Adjusted (`'regime_adjusted'`)**: Scales z-scores based on volatility regimes
+
+### Signal Enhancement Techniques
+
+1. **Momentum Filtering**: Avoids trading against strong trends by checking z-score momentum
+2. **Cross-Sectional Normalization**: Compares z-scores across multiple pairs to identify the most attractive opportunities
+3. **Top-N Selection**: Focuses on pairs with the most extreme z-scores for capital efficiency
+
+### Usage Example
+
+```python
+import pandas as pd
+from quant_research.analytics.stat_arb.zscore import ZScoreParams, generate_signal, analyze_spread
+
+# Load price data
+price_df = pd.read_csv('price_data.csv', index_col=0, parse_dates=True)
+
+# Define pairs (asset1, asset2, hedge_ratio)
+pairs = [
+    ('AAPL', 'MSFT', 1.2),
+    ('JPM', 'GS', 0.8),
+    ('XLE', 'XOM', 2.1)
+]
+
+# Set parameters
+params = ZScoreParams(
+    method='regime_adjusted',   # Use regime-adjusted z-scores
+    window=60,                  # 60-day calculation window
+    entry_threshold=2.5,        # Entry threshold (2.5 std dev)
+    exit_threshold=0.5,         # Exit threshold (0.5 std dev)
+    filter_momentum=True,       # Filter out signals fighting momentum
+    normalize_cross_sectional=True  # Compare across pairs
+)
+
+# Generate signals
+signals = generate_signal(price_df, pairs, params=params)
+
+# Analyze a specific spread
+spread_analysis = analyze_spread(
+    price_df, 
+    asset1='AAPL', 
+    asset2='MSFT',
+    hedge_ratio=1.2,  # Use fixed ratio or None to estimate
+    params=params
+)
+
+# Print spread analytics
+print(f"Current Z-Score: {spread_analysis.current_zscore:.2f}")
+print(f"Half-life: {spread_analysis.half_life:.1f} days")
+print(f"% Time in Extreme Zone: {spread_analysis.pct_extreme_pos + spread_analysis.pct_extreme_neg:.1f}%")
+```
+
+## Implementation Examples
+
+### Complete Workflow
+
+```python
+import pandas as pd
+from quant_research.analytics.stat_arb.cointegration import (
+    CointegrationParams, find_cointegrated_pairs
+)
+from quant_research.analytics.stat_arb.zscore import (
+    ZScoreParams, generate_signal
+)
+
+# Load price data
+price_df = pd.read_csv('price_data.csv', index_col=0, parse_dates=True)
+
+# 1. Find cointegrated pairs
+coint_params = CointegrationParams(
+    significance_level=0.05,
+    max_half_life=30,
+    min_half_life=1
+)
+coint_results = find_cointegrated_pairs(price_df, params=coint_params)
+
+# 2. Prepare pairs for z-score analysis
+pairs = [(r.asset1, r.asset2, r.hedge_ratio) for r in coint_results]
+
+# 3. Configure z-score parameters
+zscore_params = ZScoreParams(
+    method='ewma',           # Use exponentially-weighted z-scores
+    window=60,               # 60-day window
+    entry_threshold=2.0,     # Enter at 2 standard deviations
+    exit_threshold=0.5,      # Exit at 0.5 standard deviations
+    filter_momentum=True,    # Avoid fighting strong trends
+    top_n_pairs=5            # Focus on top 5 opportunities
+)
+
+# 4. Generate signals
+signals = generate_signal(price_df, pairs, params=zscore_params)
+
+# 5. Output signals for backtesting
+signals.to_parquet('signals.parquet')
+```
+
+### Notebook Analysis
+
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+from quant_research.analytics.stat_arb.cointegration import test_cointegration, CointegrationParams
+from quant_research.analytics.stat_arb.zscore import analyze_spread, ZScoreParams
+
+# Load price data
+price_df = pd.read_csv('price_data.csv', index_col=0, parse_dates=True)
+
+# Test a specific pair
+coint_result = test_cointegration(
+    price_df['AAPL'], 
+    price_df['MSFT'],
+    params=CointegrationParams(significance_level=0.05)
+)
+
+if coint_result.is_cointegrated:
+    print(f"Pair is cointegrated (p-value: {coint_result.p_value:.4f})")
+    print(f"Hedge ratio: {coint_result.hedge_ratio:.4f}")
+    print(f"Half-life: {coint_result.half_life:.2f} days")
+    
+    # Analyze spread across different methods
+    methods = ['rolling', 'ewma', 'regime_adjusted']
+    fig, axes = plt.subplots(len(methods), 1, figsize=(12, 9), sharex=True)
+    
+    for i, method in enumerate(methods):
+        params = ZScoreParams(method=method, window=60)
+        analysis = analyze_spread(
+            price_df, 
+            'AAPL', 
+            'MSFT', 
+            hedge_ratio=coint_result.hedge_ratio,
+            params=params
+        )
+        
+        # Plot z-scores
+        axes[i].plot(analysis.zscore)
+        axes[i].axhline(2.0, color='red', linestyle='--', alpha=0.7)
+        axes[i].axhline(-2.0, color='green', linestyle='--', alpha=0.7)
+        axes[i].axhline(0, color='black', linestyle='-', alpha=0.2)
+        axes[i].set_title(f"Z-Score ({method})")
+        axes[i].set_ylabel('Z-Score')
+    
+    plt.tight_layout()
+    plt.show()
+```
+
+## Advanced Configurations
+
+### Regime Detection
+
+The regime-adjusted z-score method automatically adapts to changing market volatility:
+
+```python
+params = ZScoreParams(
+    method='regime_adjusted',
+    window=60,                 # Base window for z-score
+    vol_window=252,            # Window for volatility regime detection
+    regime_threshold=1.5       # Threshold for high volatility regime
+)
+```
+
+### Cross-Sectional Analysis
+
+Comparing z-scores across the universe to find the most extreme opportunities:
+
+```python
+params = ZScoreParams(
+    normalize_cross_sectional=True,  # Normalize across pairs
+    top_n_pairs=5                    # Focus on top 5 opportunities
+)
+```
+
+### Momentum Filtering
+
+Avoiding signals that fight strong trends:
+
+```python
+params = ZScoreParams(
+    filter_momentum=True,     # Enable momentum filtering
+    momentum_window=5         # Look at 5-period momentum
+)
+```
+
+## Performance Considerations
+
+### Large Asset Universes
+
+When analyzing large universes (100+ assets), consider:
+
+1. Using the `find_cointegrated_pairs` function with a strict `significance_level` (e.g., 0.01)
+2. Pre-filtering pairs based on domain knowledge
+3. Enabling the `parallel` parameter (requires implementation)
+
+### Long Time Series
+
+For datasets with many observations:
+
+1. Use the `min_periods` parameter to handle the initialization period
+2. Consider using the `'ewma'` method for faster calculation with long histories
+
+### Memory Optimization
+
+For memory-constrained environments:
+
+1. Process pairs in batches
+2. Avoid storing unnecessary intermediate results
+3. Use the streaming API when available
+
+## Integration with Backtest Engine
+
+The signal DataFrame output is designed to integrate with the backtest engine:
+
+```python
+# Output schema:
+# - timestamp: Signal timestamp
+# - asset: Asset identifier
+# - signal: 1 (long), -1 (short), 0 (exit)
+# - strength: Signal strength (typically 0-3)
+# - metadata: Dictionary with additional information
+```
+
+Metadata contains important information for the strategy implementation:
+
+- `zscore`: Current z-score value
+- `pair`: For pair trades, identifies the related asset
+- `hedge_ratio`: Position sizing ratio for pair trades
+- `expiry`: How long the signal remains valid
+- `strategy`: Identifies the signal source

@@ -1,0 +1,373 @@
+# Regime Detector Module
+
+## Overview
+
+The Regime Detector module identifies distinct market states (regimes) in financial time series data. It provides tools to detect when markets shift between different behavioral modes such as trending, mean-reverting, or high-volatility states.
+
+This module implements two primary approaches to regime detection:
+
+1. **Hidden Markov Models (HMM)** - Uses probabilistic state transitions to identify distinct regimes
+2. **Change Point Detection** - Identifies abrupt shifts in the statistical properties of time series
+
+These detected regimes can be used to:
+- Adjust trading strategy parameters based on market conditions
+- Scale position sizes according to detected volatility regimes
+- Filter trading signals that might perform poorly in certain regimes
+- Provide overlay visualization on price charts
+
+## Installation
+
+The module is part of the `quant_research` package. No additional installation is required beyond the project dependencies, which include:
+
+- `numpy` and `pandas` for data manipulation
+- `hmmlearn` for Hidden Markov Models
+- `ruptures` for change point detection
+- `scikit-learn` for data preprocessing
+
+## Architecture
+
+The module consists of three main files:
+
+- `base.py` - Contains common utilities and an abstract base class
+- `hmm.py` - Implements Hidden Markov Model-based regime detection
+- `change_point.py` - Implements change point detection algorithms
+
+The package follows an object-oriented design with a common interface defined by the `RegimeDetectorBase` abstract class, ensuring consistent behavior across different implementations.
+
+## API Reference
+
+### Main Interface
+
+The module provides a unified interface through the `generate_signal` function in `__init__.py`:
+
+```python
+def generate_signal(
+    df: pd.DataFrame,
+    method: str = "hmm",
+    n_states: Optional[int] = None,
+    n_bkps: Optional[int] = None,
+    features: List[str] = ["returns", "volatility"],
+    **kwargs
+) -> pd.DataFrame
+```
+
+**Parameters:**
+
+- `df` - DataFrame containing financial time series data (must have at least one of: returns, close, volume)
+- `method` - Detection method: 'hmm' or 'change_point'
+- `n_states` - Number of regimes to detect (for HMM method)
+- `n_bkps` - Number of breakpoints to detect (for change_point method)
+- `features` - List of column names to use as input features
+- `**kwargs` - Additional parameters passed to the specific algorithm
+
+**Returns:**
+
+- DataFrame with original data plus additional columns:
+  - `regime_state` - Integer label for detected regime (0, 1, 2, etc.)
+  - `regime_duration` - Number of periods the current regime has lasted
+  - Various metadata columns specific to the detection method
+
+### HMM-based Detection
+
+The HMM implementation uses Gaussian emissions to model different market states:
+
+```python
+from quant_research.analytics.regimes import generate_signal
+
+# Using HMM with 3 states
+result = generate_signal(
+    df,
+    method="hmm",
+    n_states=3,
+    features=["returns", "volatility"],
+    window=20,
+    covariance_type="full",
+    n_iter=100,
+    random_state=42
+)
+```
+
+**HMM-specific Parameters:**
+
+- `n_states` - Number of hidden states to detect (typically 2-4)
+- `covariance_type` - Type of covariance parameter ('full', 'tied', 'diagonal', 'spherical')
+- `n_iter` - Maximum number of iterations for EM algorithm
+- `random_state` - Random seed for reproducibility
+
+**HMM-specific Return Columns:**
+
+- `regime_probability` - Array of probabilities for each possible state
+- `dominant_probability` - Probability of the most likely state
+- `transition_matrix` - String representation of the state transition matrix
+- `log_likelihood` - Log-likelihood of the fitted model
+
+### Change Point Detection
+
+The change point implementation identifies abrupt shifts in the time series:
+
+```python
+from quant_research.analytics.regimes import generate_signal
+
+# Using change point detection with 10 breakpoints
+result = generate_signal(
+    df,
+    method="change_point",
+    n_bkps=10,
+    features=["returns", "volatility"],
+    model="rbf",
+    min_size=20
+)
+```
+
+**Change Point-specific Parameters:**
+
+- `n_bkps` - Number of breakpoints to detect
+- `penalty` - Penalty value for model complexity (alternative to n_bkps)
+- `model` - Cost model ('l1', 'l2', 'rbf', 'linear', 'normal', 'ar')
+- `min_size` - Minimum segment length
+- `method` - Detection algorithm ('pelt', 'window', 'binseg', 'dynp', 'bottomup')
+- `jump` - Jump value for faster computation (higher = less precise but faster)
+
+**Change Point-specific Return Columns:**
+
+- `is_change_point` - Boolean indicating points where regime changes
+- `segment_costs` - Cost (error) for each detected segment
+
+### Online Change Point Detection
+
+For streaming applications, the module provides online detection:
+
+```python
+from quant_research.analytics.regimes import online_detection
+
+# Online detection with sliding window
+online_result = online_detection(
+    df,
+    window_size=100,
+    model="rbf",
+    threshold=5.0
+)
+```
+
+**Parameters:**
+
+- `window_size` - Size of the sliding window
+- `threshold` - Threshold for detecting a change
+- `model` - Cost model ('l1', 'l2', 'rbf', 'linear', 'normal')
+
+**Returns:**
+
+- DataFrame with original data plus:
+  - `is_change_point` - Boolean indicating detected change points
+  - `change_score` - Score indicating likelihood of a change
+
+### State Analysis
+
+To analyze the characteristics of detected regimes:
+
+```python
+from quant_research.analytics.regimes import state_analysis
+
+# Analyze regime characteristics
+analysis = state_analysis(original_df, regime_df)
+```
+
+This returns a dictionary with statistics for each regime, including:
+- Count and percentage of total observations
+- Volatility and Sharpe ratio
+- Average and maximum regime duration
+- Mean and standard deviation of various columns (volume, close, etc.)
+
+## Usage Examples
+
+### Basic HMM Example
+
+```python
+import pandas as pd
+import yfinance as yf
+from quant_research.analytics.regimes import generate_signal
+
+# Download some test data
+data = yf.download("SPY", start="2020-01-01", end="2022-12-31")
+
+# Generate regime signals
+result = generate_signal(data, method="hmm", n_states=3)
+
+# Print regime durations
+print(result.groupby("regime_state")["regime_duration"].mean())
+```
+
+### Change Point Detection with Custom Features
+
+```python
+import pandas as pd
+import yfinance as yf
+from quant_research.analytics.regimes import generate_signal
+
+# Download test data
+data = yf.download("AAPL", start="2020-01-01", end="2022-12-31")
+
+# Add custom features
+data["log_returns"] = np.log(data["close"]).diff()
+data["range"] = data["high"] - data["low"]
+data["volume_z"] = (data["volume"] - data["volume"].rolling(20).mean()) / data["volume"].rolling(20).std()
+
+# Generate regime signals with custom features
+result = generate_signal(
+    data,
+    method="change_point",
+    features=["log_returns", "range", "volume_z"],
+    n_bkps=8,
+    min_size=30
+)
+
+# Count observations in each regime
+regime_counts = result["regime_state"].value_counts().sort_index()
+print(regime_counts)
+```
+
+### Integration with Trading Strategy
+
+```python
+import pandas as pd
+from quant_research.analytics.regimes import generate_signal
+
+# Assume 'data' contains price data and strategy signals
+# Detect market regimes
+regimes = generate_signal(data, method="hmm", n_states=3)
+
+# Create regime-specific strategy
+def regime_strategy(data, regimes):
+    # Base strategy signal
+    signals = data["base_signal"]
+    
+    # Adjust signals based on regime
+    adjusted_signals = signals.copy()
+    
+    # In high volatility regime (assuming regime 2 is high volatility)
+    high_vol_mask = (regimes["regime_state"] == 2)
+    adjusted_signals[high_vol_mask] *= 0.5  # Reduce position size
+    
+    # In trending regime (assuming regime 0 is trending)
+    trend_mask = (regimes["regime_state"] == 0)
+    adjusted_signals[trend_mask] *= 1.5  # Increase position size
+    
+    return adjusted_signals
+
+# Apply the regime-aware strategy
+data["regime_signal"] = regime_strategy(data, regimes)
+```
+
+## Implementation Details
+
+### Feature Preparation
+
+Both implementations use the same feature preparation function that:
+
+1. Calculates derived features if requested:
+   - Returns (from close prices)
+   - Volatility (rolling standard deviation of returns)
+   - Volume change (percentage change in volume)
+
+2. Standardizes features using sklearn's `StandardScaler`
+
+### Hidden Markov Model Algorithm
+
+The HMM implementation:
+
+1. Fits a Gaussian HMM model with specified number of states
+2. Uses Expectation-Maximization (EM) algorithm to optimize parameters
+3. Predicts the most likely sequence of states using the Viterbi algorithm
+4. Calculates state probabilities and transition statistics
+
+### Change Point Detection Algorithm
+
+The change point implementation:
+
+1. Uses various algorithms from the `ruptures` library:
+   - PELT (Pruned Exact Linear Time) - Default, efficient
+   - Binary segmentation - Hierarchical approach
+   - Bottom-up - Merges segments
+   - Window-based - Suitable for online detection
+   - Dynamic programming - Optimal but computationally expensive
+
+2. Offers multiple cost functions:
+   - L1/L2 norms
+   - RBF (Radial Basis Function)
+   - Linear model
+   - Gaussian model
+   - Auto-regressive model
+
+## Configuration
+
+### Recommended Settings
+
+**HMM Configuration:**
+
+- For daily data, use 2-3 states for market regimes
+- For intraday data, consider higher state counts (3-4)
+- Covariance type 'full' generally provides best results but is more computationally intensive
+- Set random_state for reproducibility
+
+**Change Point Configuration:**
+
+- PELT algorithm ('pelt') provides a good balance of accuracy and speed
+- RBF cost model ('rbf') works well for capturing non-linear patterns
+- For penalty-based detection, use BIC: `2 * n_features * log(n_samples)`
+- Minimum segment length (min_size) should be set based on expected regime duration
+- For faster results, increase the jump parameter
+
+## Integration with Backtest Engine
+
+The regime detector integrates with the backtest engine by:
+
+1. Generating regime signals that can be consumed by strategy modules
+2. Providing confidence metrics for signal filtering
+3. Supporting time-series alignment with other signals
+
+Example pipeline integration:
+
+```python
+from quant_research.analytics.regimes import generate_signal
+from quant_research.backtest.strategies.adaptive_regime import AdaptiveRegimeStrategy
+
+# Detect regimes
+regime_data = generate_signal(price_data, method="hmm", n_states=3)
+
+# Create adaptive strategy
+strategy = AdaptiveRegimeStrategy(
+    regime_data=regime_data,
+    regime_mappings={
+        0: {"strategy": "momentum", "scale": 1.0},
+        1: {"strategy": "mean_reversion", "scale": 0.8},
+        2: {"strategy": "defensive", "scale": 0.5}
+    }
+)
+
+# Run backtest
+results = strategy.run()
+```
+
+## Performance Considerations
+
+- HMM is more computationally intensive than change point detection
+- For large datasets (>100,000 points), use the jump parameter in change point detection
+- For online applications, use the `online_detection` function with an appropriate window size
+- Feature calculation includes rolling windows which can introduce NaN values at the beginning of the series
+
+## Limitations
+
+- Regime detection is inherently retrospective; regimes are easier to identify after they've occurred
+- HMM assumes Gaussian distributions which may not fully capture market return distributions
+- Change point detection can be sensitive to the penalty/n_bkps parameter
+- Regimes detected by different methods may not align perfectly
+
+## Future Development
+
+Potential enhancements for the module include:
+
+- Additional regime detection algorithms (e.g., clustering-based approaches)
+- Multi-asset regime correlation analysis
+- Automatic parameter optimization (e.g., number of states)
+- Bayesian methods for uncertainty quantification
+- Wavelet-based feature extraction for improved detection

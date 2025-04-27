@@ -1,0 +1,353 @@
+# Volatility Lab Documentation
+
+## Overview
+
+The Volatility Lab is a comprehensive toolkit for analyzing and forecasting volatility in financial time series. It provides implementations of both parametric models (GARCH family) and non-parametric estimators (realized volatility measures) that can be used for signal generation in quantitative trading strategies.
+
+This module is part of the broader quantitative research framework and integrates with the analytics pipeline, feeding into the backtesting engine for strategy development and analysis.
+
+### Key Features
+
+- GARCH-based conditional volatility forecasting
+- Range-based and high-frequency realized volatility estimators
+- Automatic parameter optimization
+- Jump detection and filtering
+- Confidence interval calculation
+- Signal generation in standardized format
+- Integration with the quantitative research pipeline
+
+## Module Structure
+
+The Volatility Lab consists of the following components:
+
+```
+src/quant_research/analytics/volatility/
+├── __init__.py         # Package exports and unified API
+├── garch.py            # GARCH model implementations
+├── realized_vol.py     # Realized volatility estimators
+└── utils.py            # Common utility functions
+```
+
+### Module Descriptions
+
+- **__init__.py**: Provides a unified API for all volatility estimators
+- **garch.py**: Implements GARCH, EGARCH, and GJR-GARCH models for volatility forecasting
+- **realized_vol.py**: Implements various realized volatility estimators including standard deviation, Parkinson, Garman-Klass, Yang-Zhang, and high-frequency methods
+- **utils.py**: Contains common utility functions used across the volatility modules
+
+## Installation
+
+The Volatility Lab is included as part of the main quantitative research package. Ensure you have installed the required dependencies:
+
+```bash
+# From the project root
+pip install -e .
+
+# Or using the requirements.txt
+pip install -r requirements.txt
+```
+
+### Dependencies
+
+- numpy
+- pandas
+- scipy
+- arch (for GARCH models)
+
+## Quick Start
+
+### Basic Usage
+
+The simplest way to use the Volatility Lab is through the unified `generate_signal` API:
+
+```python
+from quant_research.analytics.volatility import generate_signal
+import pandas as pd
+
+# Load your price data
+price_data = pd.read_parquet('data/btc_usd_daily.parquet')
+
+# Generate GARCH volatility signals
+garch_signals = generate_signal(
+    price_data, 
+    estimator='garch',
+    p=1,                 # GARCH lag order
+    q=1,                 # ARCH lag order
+    window=252,          # Rolling window size
+    horizon=5            # Forecast horizon
+)
+
+# Generate realized volatility using Yang-Zhang estimator
+yz_signals = generate_signal(
+    price_data,
+    estimator='yang_zhang',
+    window=21,           # Rolling window size
+    annualize=True       # Annualize the results
+)
+
+# Save the signals
+garch_signals.to_parquet('data/signals/btc_garch_volatility.parquet')
+yz_signals.to_parquet('data/signals/btc_yz_volatility.parquet')
+```
+
+### Integration with the Analytics Pipeline
+
+When used as part of the analytics pipeline, the Volatility Lab follows the standard signal generation pattern:
+
+```python
+from quant_research.pipelines.crypto_intraday import run_pipeline
+from quant_research.analytics.volatility import generate_signal
+
+# Define a custom signal generator
+def generate_volatility_signals(data_dict, **params):
+    """Generate volatility signals for all symbols."""
+    signals = {}
+    
+    for symbol, df in data_dict.items():
+        signals[symbol] = generate_signal(
+            df, 
+            estimator='garman_klass',
+            symbol=symbol,
+            window=params.get('window', 21),
+            output_file=f"data/signals/{symbol}_volatility.parquet"
+        )
+    
+    return signals
+
+# Register the signal generator with the pipeline
+run_pipeline(
+    signal_generators=[generate_volatility_signals],
+    params={'window': 42}
+)
+```
+
+## API Reference
+
+### Main Functions
+
+#### `generate_signal(df, estimator='garch', **params)`
+
+The unified API for generating volatility signals using any available estimator.
+
+**Parameters:**
+- `df` (DataFrame): Input price data with at least a 'close' column
+- `estimator` (str): Volatility estimator to use (see Available Estimators)
+- `**params`: Additional parameters specific to the chosen estimator
+
+**Returns:**
+- DataFrame with volatility signals or list of Signal objects
+
+### Available Estimators
+
+#### GARCH Models
+
+- `'garch'`: Standard GARCH model
+- `'egarch'`: Exponential GARCH for asymmetric volatility
+- `'gjr_garch'`: GJR-GARCH for leverage effects
+
+**GARCH-specific parameters:**
+- `p` (int): GARCH lag order
+- `q` (int): ARCH lag order
+- `dist` (str): Error distribution ('normal', 't', 'skewt')
+- `window` (int): Rolling window size
+- `horizon` (int): Forecast horizon
+- `optimize_params` (bool): Whether to find optimal parameters
+
+#### Realized Volatility Estimators
+
+- `'standard'`: Standard close-to-close volatility
+- `'parkinson'`: Parkinson high-low range estimator
+- `'garman_klass'`: Garman-Klass estimator with OHLC
+- `'rogers_satchell'`: Rogers-Satchell estimator for non-zero mean
+- `'yang_zhang'`: Yang-Zhang estimator combining overnight and intraday vol
+- `'realized_variance'`: Realized variance from high-frequency returns
+- `'realized_kernel'`: Realized kernel with noise correction
+
+**Realized vol-specific parameters:**
+- `window` (int): Rolling window size
+- `annualize` (bool): Whether to annualize volatility
+- `use_high_low` (bool): Use high/low prices if available
+- `use_jump_filter` (bool): Apply jump filtering
+- `jump_threshold` (float): Z-score threshold for jumps
+
+### Common Parameters
+
+These parameters apply to all estimators:
+
+- `return_type` (str): Either 'log' or 'pct' for return calculation
+- `target_column` (str): Column to use for pricing
+- `min_periods` (int): Minimum periods for calculation
+- `alpha` (float): Significance level for confidence intervals
+- `output_file` (str): Path to save the signals
+- `as_objects` (bool): Return Signal objects instead of DataFrame
+
+## Volatility Modeling Theory
+
+### GARCH Models
+
+GARCH (Generalized Autoregressive Conditional Heteroskedasticity) models are used to estimate conditional volatility, accounting for volatility clustering and persistence.
+
+The standard GARCH(p,q) model is defined as:
+
+```
+σ²ₜ = ω + Σᵢ₌₁ᵖ αᵢε²ₜ₋ᵢ + Σⱼ₌₁ᵍ βⱼσ²ₜ₋ⱼ
+```
+
+where:
+- σ²ₜ is the conditional variance
+- ω is a constant
+- εₜ are the innovations (residuals)
+- p is the ARCH order
+- q is the GARCH order
+
+Variations include:
+- **EGARCH**: Models the log of variance, allowing for asymmetric effects
+- **GJR-GARCH**: Includes a leverage term to capture asymmetric responses to positive and negative shocks
+
+### Realized Volatility Estimators
+
+Realized volatility estimators use intraday or OHLC data to estimate historical volatility:
+
+- **Standard**: Close-to-close returns standard deviation
+- **Parkinson**: Uses daily high-low range
+- **Garman-Klass**: Uses OHLC prices, more efficient than Parkinson
+- **Rogers-Satchell**: Works for non-zero mean returns
+- **Yang-Zhang**: Combines overnight and intraday volatility
+- **Realized Variance**: Sum of squared high-frequency returns
+- **Realized Kernel**: Noise-robust version of realized variance
+
+## Advanced Usage
+
+### Parameter Optimization
+
+Automatically find optimal GARCH parameters:
+
+```python
+volatility = generate_signal(
+    price_df,
+    estimator='garch',
+    optimize_params=True,
+    model_types=['garch', 'gjr_garch'],
+    max_p=3,
+    max_q=3,
+    dists=['normal', 't']
+)
+```
+
+### Jump Detection and Filtering
+
+Filter out jump components when calculating realized volatility:
+
+```python
+volatility = generate_signal(
+    price_df,
+    estimator='standard',
+    use_jump_filter=True,
+    jump_threshold=3.0  # Z-score threshold
+)
+```
+
+### High-Frequency Data
+
+Process high-frequency data for more accurate volatility estimation:
+
+```python
+volatility = generate_signal(
+    high_freq_df,
+    estimator='realized_variance',
+    sampling_freq='5min',  # Resampling frequency
+    annualize=True
+)
+```
+
+### Custom Kernel Selection
+
+Select different kernels for the realized kernel estimator:
+
+```python
+volatility = generate_signal(
+    high_freq_df,
+    estimator='realized_kernel',
+    kernel_type='flat_top',  # Options: 'bartlett', 'flat_top', 'epanechnikov'
+    bandwidth=20  # Kernel bandwidth
+)
+```
+
+## Command-Line Interface
+
+Each module provides a command-line interface for standalone operation:
+
+### GARCH Models
+
+```bash
+python -m quant_research.analytics.volatility.garch \
+    --input data/btc_usd_daily.parquet \
+    --output data/signals/btc_garch_volatility.parquet \
+    --model-type garch \
+    --p 1 \
+    --q 1 \
+    --window 252 \
+    --optimize
+```
+
+### Realized Volatility
+
+```bash
+python -m quant_research.analytics.volatility.realized_vol \
+    --input data/btc_usd_daily.parquet \
+    --output data/signals/btc_realized_volatility.parquet \
+    --estimator yang_zhang \
+    --window 21 \
+    --annualize
+```
+
+## Extending the Volatility Lab
+
+### Adding a New Estimator
+
+To add a new volatility estimator:
+
+1. Implement the estimator function in `realized_vol.py` or `garch.py`
+2. Add a convenience function that calls `generate_signal` with the new estimator
+3. Update the estimator mapping in `__init__.py`
+
+Example:
+
+```python
+# In realized_vol.py
+def my_custom_estimator(df, window=21, min_periods=5, **params):
+    """Calculate volatility using my custom method."""
+    # Implementation here
+    return result
+
+def generate_custom_vol_signal(df, **params):
+    """Generate custom volatility signal."""
+    params['estimator'] = 'custom'
+    return generate_signal(df, **params)
+
+# In __init__.py
+from quant_research.analytics.volatility.realized_vol import generate_custom_vol_signal
+
+ESTIMATOR_METHODS.update({
+    'custom': generate_custom_vol_signal
+})
+
+__all__.append('generate_custom_vol_signal')
+```
+
+## Performance Considerations
+
+- **Memory Usage**: For large datasets, consider processing in chunks
+- **Computational Efficiency**: GARCH models can be computationally intensive for large rolling windows
+- **High-Frequency Data**: Realized kernel computation scales quadratically with the number of intraday observations
+
+## References
+
+1. Bollerslev, T. (1986). "Generalized autoregressive conditional heteroskedasticity." Journal of Econometrics, 31(3), 307-327.
+2. Nelson, D. B. (1991). "Conditional heteroskedasticity in asset returns: A new approach." Econometrica, 59(2), 347-370.
+3. Glosten, L. R., Jagannathan, R., & Runkle, D. E. (1993). "On the relation between the expected value and the volatility of the nominal excess return on stocks." Journal of Finance, 48(5), 1779-1801.
+4. Parkinson, M. (1980). "The extreme value method for estimating the variance of the rate of return." Journal of Business, 53(1), 61-65.
+5. Garman, M. B., & Klass, M. J. (1980). "On the estimation of security price volatilities from historical data." Journal of Business, 53(1), 67-78.
+6. Rogers, L. C. G., & Satchell, S. E. (1991). "Estimating variance from high, low and closing prices." Annals of Applied Probability, 1(4), 504-512.
+7. Yang, D., & Zhang, Q. (2000). "Drift-independent volatility estimation based on high, low, open, and close prices." Journal of Business, 73(3), 477-492.
+8. Barndorff-Nielsen, O. E., & Shephard, N. (2002). "Econometric analysis of realized volatility and its use in estimating stochastic volatility models." Journal of the Royal Statistical Society: Series B, 64(2), 253-280.

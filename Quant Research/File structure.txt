@@ -1,0 +1,92 @@
+quant_research_lab/                 # ← git repo root
+│
+├── README.md                       # overview + quick-start
+├── pyproject.toml                  # Poetry / PEP 621 metadata
+├── requirements.txt                # (alt) plain dep list
+├── Dockerfile                      # builds the app image
+├── docker-compose.yml              # DuckDB + Streamlit stack
+├── .env.example                    # template for API keys
+├── .github/
+│   └── workflows/ci.yml            # pytest + mypy + coverage
+│
+├── docs/                           # MkDocs / Sphinx site sources
+│   └── architecture.md
+│
+├── configs/                        # YAML or TOML configs
+│   ├── crypto_intraday.yaml
+│   └── equities_daily.yaml
+│
+├── data/                           # ✱ git-ignored ✱ local Parquet, db
+│
+├── notebooks/                      # research & demo notebooks
+│
+├── tests/                          # pytest suites
+│   ├── test_providers.py
+│   ├── test_analytics.py
+│   └── test_backtest.py
+│
+└── src/                            # import path: quant_research
+    └── quant_research/
+        │
+        ├── __init__.py
+        │
+        ├── core/                  # domain-agnostic “engine”
+        │   ├── __init__.py
+        │   ├── models.py          # PriceBar, Signal, Trade (pydantic)
+        │   ├── storage.py         # DuckDB / Arrow helpers
+        │   ├── event_bus.py       # asyncio / Kafka bridge
+        │   └── utils.py
+        │
+        ├── providers/             # plug-ins for data ingestion
+        │   ├── __init__.py
+        │   ├── base.py            # BaseProvider interface
+        │   ├── crypto_ccxt.py
+        │   ├── onchain.py
+        │   ├── sentiment_twitter.py
+        │   └── equities_yf.py
+        │
+        ├── analytics/             # pure-function alpha research
+        │   ├── __init__.py
+        │   ├── volatility/
+        │   │   ├── __init__.py
+        │   │   ├── garch.py
+        │   │   └── realized_vol.py
+        │   ├── regimes/
+        │   │   ├── __init__.py
+        │   │   ├── hmm.py
+        │   │   └── change_point.py
+        │   ├── stat_arb/
+        │   │   ├── __init__.py
+        │   │   ├── cointegration.py
+        │   │   └── zscore.py
+        │   └── sentiment_alpha/
+        │       ├── __init__.py
+        │       └── sentiment_model.py
+        │
+        ├── backtest/              # turning signals into PnL
+        │   ├── __init__.py
+        │   ├── engine.py          # wraps vectorbt
+        │   ├── fees.py
+        │   ├── risk.py
+        │   └── strategies/
+        │       ├── __init__.py
+        │       ├── momentum.py
+        │       ├── mean_reversion.py
+        │       ├── cross_exchange_arbitrage.py
+        │       ├── adaptive_regime.py
+        │       └── rl_execution.py
+        │
+        ├── dashboard/             # Streamlit UI
+        │   ├── __init__.py
+        │   ├── app.py
+        │   └── components/
+        │       ├── price_chart.py
+        │       ├── sentiment_view.py
+        │       └── performance_view.py
+        │
+        ├── pipelines/             # Prefect / Airflow DAGs
+        │   ├── __init__.py
+        │   ├── crypto_intraday.py
+        │   └── equities_daily.py
+        │
+        └── cli.py                 # `python -m quant_research ...`
