@@ -1,148 +1,87 @@
 """
-Base module for market regime detection algorithms.
+Regime detection module for market state identification.
 
-This module provides common functionality for both HMM-based and
-change point-based regime detection methods.
+This package provides tools for identifying distinct market regimes
+using various statistical methods like Hidden Markov Models and
+change point detection.
 """
 
-import logging
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, Any, List, Optional
 
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 
-from quant_research.core.models import Signal
+from quant_research.analytics.regimes.hmm import (
+    HMMRegimeDetector,
+    generate_signal as hmm_generate_signal
+)
+from quant_research.analytics.regimes.change_point import (
+    ChangePointDetector,
+    generate_signal as cp_generate_signal,
+    online_detection
+)
+from quant_research.analytics.regimes.base import state_analysis
 
 
-logger = logging.getLogger(__name__)
-
+def generate_signal(
+    df: pd.DataFrame,
+    method: str = "hmm",
+    n_states: Optional[int] = None,
+    n_bkps: Optional[int] = None,
+    features: List[str] = ["returns", "volatility"],
+    **kwargs
+) -> pd.DataFrame:
     """
-    Base class for regime detection algorithms.
+    Generate market regime signals using the specified method.
     
-    This abstract class defines the common interface for all
-    regime detection implementations.
+    This is the main entry point for the regimes module.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with market data
+    method : str
+        Detection method: 'hmm' or 'change_point'
+    n_states : Optional[int]
+        Number of regimes to detect (for HMM)
+    n_bkps : Optional[int]
+        Number of breakpoints to detect (for change_point)
+    features : List[str]
+        Features to use for regime detection
+    **kwargs
+        Additional parameters for specific algorithms
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with regime states and additional metrics
+        
+    Examples
+    --------
+    >>> import yfinance as yf
+    >>> data = yf.download("SPY", start="2020-01-01", end="2022-01-01")
+    >>> # Using HMM
+    >>> hmm_result = generate_signal(data, method="hmm", n_states=3)
+    >>> # Using change point detection
+    >>> cp_result = generate_signal(data, method="change_point", n_bkps=10)
     """
+    if method.lower() == "hmm":
+        if n_states is not None:
+            kwargs["n_states"] = n_states
+        return hmm_generate_signal(df, features=features, **kwargs)
     
-    @abstractmethod
-    def fit(self, X: pd.DataFrame, **kwargs) -> Any:
-        """
-        Fit the regime detection model.
-        
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature matrix
-        **kwargs
-            Additional parameters for the specific algorithm
-            
-        Returns
-        -------
-        Any
-            Fitted model
-        """
-        pass
+    elif method.lower() in ["change_point", "changepoint", "cp"]:
+        if n_bkps is not None:
+            kwargs["n_bkps"] = n_bkps
+        return cp_generate_signal(df, features=features, **kwargs)
     
-    @abstractmethod
-    def predict(self, X: pd.DataFrame) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """
-        Predict regimes for the given data.
-        
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature matrix
-            
-        Returns
-        -------
-        Tuple[np.ndarray, Optional[np.ndarray]]
-            Array of regime states and optionally state probabilities
-        """
-        pass
-    
-    @abstractmethod
-    def generate_signals(self, df: pd.DataFrame, states: np.ndarray, 
-                         index: pd.Index, **kwargs) -> List[Signal]:
-        """
-        Generate signals based on detected regimes.
-        
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Original dataframe
-        states : np.ndarray
-            Detected regime states
-        index : pd.Index
-            Index from dataframe
-        **kwargs
-            Additional parameters
-            
-        Returns
-        -------
-        List[Signal]
-            List of generated signals
-        """
-        pass
-    
-    def generate_signal(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        """
-        Generate market regime signals.
-        
-        This is the main entry point for all regime detection algorithms.
-        
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Input dataframe with market data
-        **kwargs
-            Additional parameters for specific algorithms
-            
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with regime states and additional metrics
-        """
-        # Prepare features
-        X, scaler = prepare_features(
-            df,
-            features=kwargs.get("features", ["returns", "volatility"]),
-            window=kwargs.get("window", 20),
-            add_derived=kwargs.get("add_derived_features", True),
-        )
-        
-        # Fit model
-        model = self.fit(X, **kwargs)
-        
-        # Predict regimes
-        states, probabilities = self.predict(X)
-        
-        # Calculate regime metrics
-        regime_df = calculate_regime_metrics(states, X.index, probabilities)
-        
-        # Generate signals
-        signals = self.generate_signals(df, states, X.index, **kwargs)
-        
-        logger.info(f"Generated {len(signals)} regime signals")
-        
-        # Merge back with original data
-        result = df.join(regime_df, how="left")
-        
-        # Add model metadata
-        for key, value in self.get_metadata().items():
-            if isinstance(value, (int, float, str, bool)) or value is None:
-                result[key] = value
-        
-        return result
-    
-    @abstractmethod
-    def get_metadata(self) -> Dict[str, Any]:
-        """
-        Get metadata about the fitted model.
-        
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary with model metadata
-        """
-        pass
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'hmm' or 'change_point'.")
+
+
+__all__ = [
+    "generate_signal",
+    "HMMRegimeDetector",
+    "ChangePointDetector",
+    "online_detection",
+    "state_analysis",
+]

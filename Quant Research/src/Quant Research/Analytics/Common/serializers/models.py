@@ -1,101 +1,82 @@
-"""Serializers for primitive data types."""
+"""Serializers for domain models."""
 
-import base64
-from datetime import datetime, date
-from typing import Dict, Any, Type, Union
+from datetime import datetime
+from typing import Dict, Any, Type
 
-import numpy as np
-
+from quant_research.core.models import Signal
 from ..core import TypeSerializer
 
-class DateTimeSerializer(TypeSerializer[Union[datetime, date]]):
-    """Serializer for datetime objects."""
+class SignalSerializer(TypeSerializer[Signal]):
+    """Serializer for Signal objects."""
     
     @property
-    def target_type(self) -> Type[Union[datetime, date]]:
-        return datetime
+    def target_type(self) -> Type[Signal]:
+        return Signal
     
-    def serialize(self, obj: Union[datetime, date]) -> Dict[str, Any]:
+    def serialize(self, obj: Signal) -> Dict[str, Any]:
         """
-        Serialize datetime to dictionary.
+        Serialize Signal to dictionary.
         
         Args:
-            obj: Datetime or date object to serialize
+            obj: Signal object to serialize
             
         Returns:
-            Dictionary representation with ISO format string
-            
-        Raises:
-            TypeError: If obj is not a datetime or date
-        """
-        if isinstance(obj, datetime):
-            return {
-                "type": "datetime",
-                "iso": obj.isoformat()
-            }
-        elif isinstance(obj, date):
-            return {
-                "type": "date",
-                "iso": obj.isoformat()
-            }
-        raise TypeError(f"Expected datetime or date, got {type(obj)}")
-    
-    def deserialize(self, data: Dict[str, Any]) -> Union[datetime, date]:
-        """
-        Deserialize dictionary to datetime.
-        
-        Args:
-            data: Dictionary with type and ISO format string
-            
-        Returns:
-            Datetime or date object
-            
-        Raises:
-            ValueError: If type is unknown
-        """
-        iso_str = data["iso"]
-        if data["type"] == "datetime":
-            return datetime.fromisoformat(iso_str)
-        elif data["type"] == "date":
-            return date.fromisoformat(iso_str)
-        raise ValueError(f"Unknown datetime type: {data['type']}")
-
-
-class NumpySerializer(TypeSerializer[np.ndarray]):
-    """Serializer for NumPy arrays."""
-    
-    @property
-    def target_type(self) -> Type[np.ndarray]:
-        return np.ndarray
-    
-    def serialize(self, obj: np.ndarray) -> Dict[str, Any]:
-        """
-        Serialize ndarray to dictionary.
-        
-        Args:
-            obj: NumPy array to serialize
-            
-        Returns:
-            Dictionary with array data, dtype, and shape
+            Dictionary representation of the Signal
         """
         return {
-            "type": "numpy.ndarray",
-            "data": base64.b64encode(obj.tobytes()).decode('ascii'),
-            "dtype": str(obj.dtype),
-            "shape": list(obj.shape)
+            "timestamp": obj.timestamp.isoformat(),
+            "asset": obj.asset,
+            "signal": obj.signal,
+            "strength": float(obj.strength),
+            "metadata": obj.metadata
         }
     
-    def deserialize(self, data: Dict[str, Any]) -> np.ndarray:
+    def deserialize(self, data: Dict[str, Any]) -> Signal:
         """
-        Deserialize dictionary to ndarray.
+        Deserialize dictionary to Signal.
         
         Args:
-            data: Dictionary with array data, dtype, and shape
+            data: Dictionary representation of a Signal
             
         Returns:
-            NumPy array
+            Signal object
         """
-        binary_data = base64.b64decode(data["data"])
-        dtype = np.dtype(data["dtype"])
-        shape = tuple(data["shape"])
-        return np.frombuffer(binary_data, dtype=dtype).reshape(shape)
+        # Convert timestamp string to datetime
+        if isinstance(data["timestamp"], str):
+            timestamp = datetime.fromisoformat(data["timestamp"])
+        else:
+            timestamp = data["timestamp"]
+            
+        return Signal(
+            timestamp=timestamp,
+            asset=data["asset"],
+            signal=data["signal"],
+            strength=data["strength"],
+            metadata=data.get("metadata", {})
+        )
+
+# Add additional domain model serializers here as needed
+# For example:
+#
+# class AnalyticsResultSerializer(TypeSerializer[AnalyticsResult]):
+#     """Serializer for AnalyticsResult objects."""
+#     
+#     @property
+#     def target_type(self) -> Type[AnalyticsResult]:
+#         return AnalyticsResult
+#     
+#     def serialize(self, obj: AnalyticsResult) -> Dict[str, Any]:
+#         """Serialize AnalyticsResult to dictionary."""
+#         return {
+#             "timestamp": obj.timestamp.isoformat(),
+#             "value": obj.value,
+#             "metadata": obj.metadata
+#         }
+#     
+#     def deserialize(self, data: Dict[str, Any]) -> AnalyticsResult:
+#         """Deserialize dictionary to AnalyticsResult."""
+#         return AnalyticsResult(
+#             timestamp=datetime.fromisoformat(data["timestamp"]),
+#             value=data["value"],
+#             metadata=data.get("metadata", {})
+#         )
