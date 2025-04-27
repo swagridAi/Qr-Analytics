@@ -1,1831 +1,1510 @@
 """
-Statistical Analysis Utilities
+Data Preparation Utilities
 
-This module provides statistical functions commonly used across all analytics modules.
-It includes correlation analysis, hypothesis testing, regression analysis, and various
-financial metrics.
+This module provides common data preparation, cleaning, and feature engineering
+functions used across all analytics modules. It ensures consistent preprocessing
+approaches and reduces code duplication.
 
 Features:
-- Correlation and cointegration analysis
-- Statistical tests for time series
-- Distribution analysis and fitting
-- Financial performance metrics
-- Hypothesis testing and regression analysis
+- DataFrame validation and cleaning
+- Return calculation with multiple methodologies
+- Feature engineering for time series data
+- Outlier detection and handling
+- Cross-validation for time series
+- Resampling and alignment utilities
 
 Usage:
     ```python
-    from quant_research.analytics.common.statistics import (
-        calculate_correlation,
-        test_stationarity,
-        calculate_sharpe_ratio,
-        fit_distribution
+    from quant_research.analytics.common.data_prep import (
+        ensure_datetime_index,
+        calculate_returns,
+        add_technical_features
     )
     
-    # Calculate correlation between two assets
-    corr = calculate_correlation(asset1_returns, asset2_returns, method='pearson')
+    # Prepare DataFrame
+    df = ensure_datetime_index(df)
     
-    # Test for stationarity
-    is_stationary, p_value = test_stationarity(price_series)
+    # Calculate returns
+    df['returns'] = calculate_returns(df['close'], method='log')
     
-    # Calculate Sharpe ratio
-    sharpe = calculate_sharpe_ratio(returns, risk_free_rate=0.02)
-    
-    # Fit distribution to returns
-    dist_params = fit_distribution(returns, dist_family='t')
+    # Add common technical features
+    df = add_technical_features(df, window=20)
     ```
 """
 
 # Standard library imports
 import logging
-import warnings
-from typing import Dict, List, Optional, Tuple, Union, Any, Callable
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Union, Callable, Any
 
 # Third-party imports
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
-from scipy import optimize, signal
-from statsmodels.tsa.stattools import adfuller, kpss, acf, pacf, coint
-from statsmodels.tsa.api import VAR
-from statsmodels.regression.linear_model import OLS
-import statsmodels.api as sm
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
 
 # Configure module logger
-logger = logging.getLogger("quant_research.analytics.common.statistics")
+logger = logging.getLogger("quant_research.analytics.common.data_prep")
 
 #------------------------------------------------------------------------
-# Correlation and Cointegration Analysis
+# DataFrame Validation and Preparation
 #------------------------------------------------------------------------
 
-def calculate_correlation(
-    x: Union[pd.Series, np.ndarray],
-    y: Union[pd.Series, np.ndarray],
-    method: str = 'pearson',
-    min_periods: Optional[int] = None
-) -> float:
+def ensure_datetime_index(
+    df: pd.DataFrame, 
+    timestamp_col: str = 'timestamp',
+    inplace: bool = False
+) -> pd.DataFrame:
     """
-    Calculate correlation between two series.
+    Ensure DataFrame has a datetime index, converting if necessary.
     
     Args:
-        x: First time series
-        y: Second time series
-        method: Correlation method ('pearson', 'spearman', 'kendall')
-        min_periods: Minimum number of valid observations
+        df: Input DataFrame
+        timestamp_col: Column name to use for timestamp if not indexed
+        inplace: Whether to modify the DataFrame in place
         
     Returns:
-        Correlation coefficient
+        DataFrame with datetime index
         
     Raises:
-        ValueError: If an invalid method is specified
+        ValueError: If no timestamp column is found
     """
-    # Convert numpy arrays to pandas Series if necessary
-    if isinstance(x, np.ndarray):
-        x = pd.Series(x)
-    if isinstance(y, np.ndarray):
-        y = pd.Series(y)
-    
-    # Align series
-    x, y = x.align(y, join='inner')
-    
-    # Check we have enough data
-    if len(x) == 0:
-        logger.warning("No overlapping data for correlation calculation")
-        return np.nan
-    
-    # Default min_periods if not specified
-    if min_periods is None:
-        min_periods = min(10, len(x) // 2)
-    
-    # Calculate correlation
-    if method == 'pearson':
-        return x.corr(y, method='pearson', min_periods=min_periods)
-    elif method == 'spearman':
-        return x.corr(y, method='spearman', min_periods=min_periods)
-    elif method == 'kendall':
-        return x.corr(y, method='kendall', min_periods=min_periods)
-    else:
-        raise ValueError(f"Invalid correlation method: {method}. Use 'pearson', 'spearman', or 'kendall'")
-
-
-def rolling_correlation(
-    x: pd.Series,
-    y: pd.Series,
-    window: int = 60,
-    method: str = 'pearson',
-    min_periods: Optional[int] = None
-) -> pd.Series:
-    """
-    Calculate rolling correlation between two series.
-    
-    Args:
-        x: First time series
-        y: Second time series
-        window: Rolling window size
-        method: Correlation method ('pearson', 'spearman', 'kendall')
-        min_periods: Minimum number of valid observations
+    if not inplace:
+        df = df.copy()
         
-    Returns:
-        Series with rolling correlation values
+    # Check if already has datetime index
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df
         
-    Raises:
-        ValueError: If an invalid method is specified
-    """
-    # Align series
-    x, y = x.align(y, join='inner')
+    # Try to set index from timestamp column
+    if timestamp_col in df.columns:
+        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+        return df.set_index(timestamp_col)
     
-    # Default min_periods if not specified
-    if min_periods is None:
-        min_periods = min(10, window // 2)
-    
-    # Create DataFrame with both series
-    df = pd.DataFrame({'x': x, 'y': y})
-    
-    # Calculate rolling correlation
-    if method == 'pearson':
-        return df['x'].rolling(window=window, min_periods=min_periods).corr(df['y'])
-    elif method == 'spearman':
-        # Calculate rank series
-        x_rank = x.rank()
-        y_rank = y.rank()
-        df_rank = pd.DataFrame({'x_rank': x_rank, 'y_rank': y_rank})
-        return df_rank['x_rank'].rolling(window=window, min_periods=min_periods).corr(df_rank['y_rank'])
-    elif method == 'kendall':
-        # For Kendall, we compute for each window manually
-        result = pd.Series(index=df.index, dtype=float)
-        for i in range(len(df) - window + 1):
-            if i + window > len(df):
-                break
-            window_data = df.iloc[i:i+window]
-            if len(window_data.dropna()) >= min_periods:
-                tau, _ = stats.kendalltau(window_data['x'].dropna(), window_data['y'].dropna())
-                result.iloc[i+window-1] = tau
-        return result
-    else:
-        raise ValueError(f"Invalid correlation method: {method}. Use 'pearson', 'spearman', or 'kendall'")
-
-
-def cross_correlation(
-    x: pd.Series,
-    y: pd.Series,
-    max_lags: int = 10,
-    normalize: bool = True
-) -> Tuple[pd.Series, int]:
-    """
-    Calculate cross-correlation function (CCF) to find lead-lag relationships.
-    
-    Args:
-        x: First time series
-        y: Second time series
-        max_lags: Maximum number of lags to compute
-        normalize: Whether to normalize (output in [-1, 1])
-        
-    Returns:
-        Series with CCF values and lag with maximum correlation
-        
-    Notes:
-        - Positive lag: x leads y
-        - Negative lag: y leads x
-    """
-    # Align series
-    x, y = x.align(y, join='inner')
-    
-    # Calculate cross-correlation
-    ccf_values = {}
-    
-    for lag in range(-max_lags, max_lags + 1):
-        if lag < 0:
-            # y is shifted |lag| periods forward (y leads)
-            corr = x.corr(y.shift(lag))
-        elif lag > 0:
-            # x is shifted lag periods forward (x leads)
-            corr = x.shift(-lag).corr(y)
-        else:
-            # Contemporaneous
-            corr = x.corr(y)
-        
-        ccf_values[lag] = corr
-    
-    # Create Series with CCF values
-    ccf_series = pd.Series(ccf_values)
-    
-    # Find lag with maximum correlation
-    max_corr_lag = ccf_series.apply(abs).idxmax()
-    
-    return ccf_series, max_corr_lag
-
-
-def test_cointegration(
-    x: pd.Series,
-    y: pd.Series,
-    method: str = 'johansen',
-    regression_method: str = 'ols',
-    max_lags: int = None,
-    trend: str = 'c',
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test for cointegration between two time series.
-    
-    Args:
-        x: First time series
-        y: Second time series
-        method: Test method ('engle-granger', 'johansen')
-        regression_method: Regression method for Engle-Granger ('ols', 'ts')
-        max_lags: Maximum lags for ADF test (None for automatic)
-        trend: Type of trend ('c', 'ct', 'ctt', 'nc')
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with test results including:
-            - is_cointegrated: Boolean indicating cointegration
-            - p_value: P-value of the test
-            - test_statistic: Test statistic
-            - critical_values: Critical values
-            - hedge_ratio: Hedge ratio (beta) for pair trading
-            - half_life: Half-life of mean reversion (in periods)
-            - spread: Cointegrated residual series
-            
-    Raises:
-        ValueError: If an invalid method is specified
-    """
-    # Align series
-    x, y = x.align(y, join='inner')
-    
-    # Check we have enough data
-    if len(x) < 30:  # Arbitrary minimum for decent cointegration test
-        logger.warning("Insufficient data for cointegration test (minimum 30 points)")
-        return {
-            'is_cointegrated': False,
-            'p_value': np.nan,
-            'test_statistic': np.nan,
-            'critical_values': {},
-            'hedge_ratio': np.nan,
-            'half_life': np.nan,
-            'spread': pd.Series(dtype=float)
-        }
-    
-    # Create DataFrame for the regression
-    df = pd.DataFrame({'x': x, 'y': y}).dropna()
-    x = df['x']
-    y = df['y']
-    
-    # Perform cointegration test
-    if method == 'engle-granger':
-        # Engle-Granger test (two-step approach)
-        
-        # Step 1: Estimate cointegrating relationship
-        if regression_method == 'ols':
-            # OLS regression
-            model = sm.OLS(y, sm.add_constant(x))
-            results = model.fit()
-            const = results.params[0]
-            hedge_ratio = results.params[1]
-            spread = y - (const + hedge_ratio * x)
-        else:  # ts (theil-sen)
-            # Theil-Sen estimator (more robust to outliers)
-            slope, intercept = stats.theilslopes(y, x)
-            hedge_ratio = slope
-            const = intercept
-            spread = y - (const + hedge_ratio * x)
-        
-        # Step 2: Test for stationarity of residuals
-        adf_result = adfuller(spread, maxlag=max_lags, regression=trend)
-        test_statistic = adf_result[0]
-        p_value = adf_result[1]
-        critical_values = adf_result[4]
-        
-        is_cointegrated = p_value < significance_level
-        
-    elif method == 'johansen':
-        # Johansen test (system approach)
-        from statsmodels.tsa.vector_ar.vecm import coint_johansen
-        
-        # Prepare data for Johansen test
-        data = pd.concat([x, y], axis=1).dropna()
-        
-        # Perform Johansen cointegration test
-        try:
-            # Determine lag order
-            if max_lags is None:
-                max_lags = int(np.ceil(12 * (len(data) / 100) ** (1 / 4)))
-            
-            # Johansen test
-            result = coint_johansen(data, det_order=0, k_ar_diff=max_lags)
-            
-            # Extract results (first eigenvalue for two series)
-            test_statistic = result.lr1[0]
-            
-            # Get critical values
-            # 90%, 95%, and 99% critical values for trace test
-            critical_values = {
-                '90%': result.cvt[0, 0],
-                '95%': result.cvt[0, 1],
-                '99%': result.cvt[0, 2]
-            }
-            
-            # Determine if cointegrated
-            is_cointegrated = test_statistic > critical_values[f'{int((1-significance_level)*100)}%']
-            
-            # Calculate p-value (approximate via interpolation)
-            # For simplicity, we'll use critical values to approximate
-            if test_statistic > critical_values['99%']:
-                p_value = 0.01
-            elif test_statistic > critical_values['95%']:
-                p_value = 0.05
-            elif test_statistic > critical_values['90%']:
-                p_value = 0.1
-            else:
-                p_value = 0.2  # Rough approximation
-            
-            # Get cointegrating vector
-            if is_cointegrated:
-                # The cointegrating vector is the eigenvector for the first eigenvalue
-                coint_vector = result.evec[:, 0]
-                hedge_ratio = -coint_vector[1] / coint_vector[0]
-                const = 0  # Johansen without constant term
-                spread = y - hedge_ratio * x
-            else:
-                hedge_ratio = np.nan
-                const = np.nan
-                spread = pd.Series(np.nan, index=x.index)
-            
-        except Exception as e:
-            logger.warning(f"Johansen test failed: {e}")
-            is_cointegrated = False
-            test_statistic = np.nan
-            p_value = np.nan
-            critical_values = {}
-            hedge_ratio = np.nan
-            const = np.nan
-            spread = pd.Series(np.nan, index=x.index)
-            
-    else:
-        raise ValueError(f"Invalid cointegration test method: {method}. Use 'engle-granger' or 'johansen'")
-    
-    # Calculate half-life of mean reversion
-    half_life = np.nan
-    if is_cointegrated:
-        # Regress change in spread on lag of spread
-        spread_lag = spread.shift(1)
-        spread_diff = spread - spread_lag
-        
-        # Drop NaN values
-        valid_data = pd.DataFrame({'diff': spread_diff, 'lag': spread_lag}).dropna()
-        
-        if len(valid_data) > 0:
-            # Calculate half-life via AR(1) model
-            model = sm.OLS(valid_data['diff'], valid_data['lag'])
-            results = model.fit()
-            
-            # Coefficient should be negative for mean reversion
-            if results.params[0] < 0:
-                half_life = np.log(2) / abs(results.params[0])
-            else:
-                half_life = np.inf  # Not mean-reverting
-    
-    return {
-        'is_cointegrated': is_cointegrated,
-        'p_value': p_value,
-        'test_statistic': test_statistic,
-        'critical_values': critical_values,
-        'hedge_ratio': hedge_ratio,
-        'half_life': half_life,
-        'spread': spread
-    }
-
-
-def granger_causality_test(
-    x: pd.Series,
-    y: pd.Series,
-    max_lag: int = 5,
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test for Granger causality between two time series.
-    
-    Args:
-        x: First time series
-        y: Second time series
-        max_lag: Maximum number of lags to test
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with test results including:
-            - x_causes_y: Boolean indicating if x Granger-causes y
-            - y_causes_x: Boolean indicating if y Granger-causes x
-            - x_to_y_p_values: P-values for x causing y at different lags
-            - y_to_x_p_values: P-values for y causing x at different lags
-            - optimal_lag: Optimal lag based on information criteria
-    """
-    # Align series
-    x, y = x.align(y, join='inner')
-    
-    # Create DataFrame for VAR model
-    data = pd.DataFrame({'x': x, 'y': y}).dropna()
-    
-    # Drop rows with NaN values
-    data = data.dropna()
-    
-    # Create results dictionary
-    results = {
-        'x_causes_y': False,
-        'y_causes_x': False,
-        'x_to_y_p_values': {},
-        'y_to_x_p_values': {},
-        'optimal_lag': 1
-    }
-    
-    # Try different lag orders
-    min_lag = min(12, max_lag)
-    x_to_y_significant = False
-    y_to_x_significant = False
-    
-    try:
-        # Determine optimal lag using information criteria
-        for lag in range(1, min_lag + 1):
-            # Fit VAR model
-            model = VAR(data)
-            try:
-                res = model.fit(lag)
-                
-                # Test Granger causality
-                try:
-                    # Test if x Granger-causes y
-                    test_x_y = res.test_causality(caused='y', causing='x')
-                    p_val_x_y = test_x_y['pvalue']
-                    results['x_to_y_p_values'][lag] = p_val_x_y
-                    
-                    # Test if y Granger-causes x
-                    test_y_x = res.test_causality(caused='x', causing='y')
-                    p_val_y_x = test_y_x['pvalue']
-                    results['y_to_x_p_values'][lag] = p_val_y_x
-                    
-                    # Check for statistical significance
-                    if p_val_x_y < significance_level:
-                        x_to_y_significant = True
-                    
-                    if p_val_y_x < significance_level:
-                        y_to_x_significant = True
-                
-                except Exception as e:
-                    logger.warning(f"Granger causality test failed for lag {lag}: {e}")
-                    continue
-            
-            except Exception as e:
-                logger.warning(f"Failed to fit VAR model for lag {lag}: {e}")
-                continue
-        
-        # Find optimal lag using AIC
-        model = VAR(data)
-        lag_order = model.select_order(maxlags=min_lag)
-        results['optimal_lag'] = lag_order.aic
-        
-        # Set final results
-        results['x_causes_y'] = x_to_y_significant
-        results['y_causes_x'] = y_to_x_significant
-        
-    except Exception as e:
-        logger.warning(f"Granger causality test failed: {e}")
-    
-    return results
-
-
-#------------------------------------------------------------------------
-# Statistical Tests
-#------------------------------------------------------------------------
-
-def test_stationarity(
-    series: pd.Series,
-    test_type: str = 'adf',
-    regression: str = 'c',
-    max_lags: Optional[int] = None,
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test time series for stationarity.
-    
-    Args:
-        series: Time series to test
-        test_type: Type of test ('adf', 'kpss', 'both')
-        regression: Regression type for ADF ('c', 'ct', 'ctt', 'nc')
-        max_lags: Maximum lags for test (None for automatic)
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with test results
-        
-    Raises:
-        ValueError: If an invalid test type is specified
-    """
-    # Remove NaN values
-    series_clean = series.dropna()
-    
-    if len(series_clean) < 20:  # Arbitrary minimum for decent stationarity test
-        logger.warning("Insufficient data for stationarity test (minimum 20 points)")
-        return {
-            'is_stationary': None,
-            'adf_statistic': np.nan,
-            'adf_p_value': np.nan,
-            'kpss_statistic': np.nan,
-            'kpss_p_value': np.nan,
-            'critical_values': {}
-        }
-    
-    results = {
-        'is_stationary': None,
-        'adf_statistic': None,
-        'adf_p_value': None,
-        'kpss_statistic': None,
-        'kpss_p_value': None,
-        'critical_values': {}
-    }
-    
-    # Run appropriate test(s)
-    if test_type in ['adf', 'both']:
-        # Augmented Dickey-Fuller test
-        # Null hypothesis: series has a unit root (non-stationary)
-        try:
-            adf_result = adfuller(series_clean, regression=regression, maxlag=max_lags)
-            results['adf_statistic'] = adf_result[0]
-            results['adf_p_value'] = adf_result[1]
-            results['critical_values']['adf'] = adf_result[4]
-        except Exception as e:
-            logger.warning(f"ADF test failed: {e}")
-    
-    if test_type in ['kpss', 'both']:
-        # KPSS test
-        # Null hypothesis: series is stationary
-        try:
-            kpss_result = kpss(series_clean, regression=regression, nlags=max_lags)
-            results['kpss_statistic'] = kpss_result[0]
-            results['kpss_p_value'] = kpss_result[1]
-            results['critical_values']['kpss'] = kpss_result[3]
-        except Exception as e:
-            logger.warning(f"KPSS test failed: {e}")
-    
-    # Determine stationarity based on test results
-    if test_type == 'adf':
-        # For ADF, reject null hypothesis (p < alpha) means stationary
-        results['is_stationary'] = results['adf_p_value'] < significance_level
-    elif test_type == 'kpss':
-        # For KPSS, fail to reject null hypothesis (p > alpha) means stationary
-        results['is_stationary'] = results['kpss_p_value'] >= significance_level
-    elif test_type == 'both':
-        # Require both tests to agree for more conservative estimate
-        if results['adf_p_value'] is not None and results['kpss_p_value'] is not None:
-            adf_stationary = results['adf_p_value'] < significance_level
-            kpss_stationary = results['kpss_p_value'] >= significance_level
-            results['is_stationary'] = adf_stationary and kpss_stationary
-    else:
-        raise ValueError(f"Invalid test type: {test_type}. Use 'adf', 'kpss', or 'both'")
-    
-    return results
-
-
-def test_normality(
-    series: pd.Series,
-    test_type: str = 'shapiro',
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test if data follows a normal distribution.
-    
-    Args:
-        series: Data to test
-        test_type: Type of test ('shapiro', 'ks', 'jarque_bera', 'anderson')
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with test results
-        
-    Raises:
-        ValueError: If an invalid test type is specified
-    """
-    # Remove NaN values
-    series_clean = series.dropna()
-    
-    results = {
-        'is_normal': None,
-        'statistic': None,
-        'p_value': None,
-        'critical_values': {}
-    }
-    
-    # Standardize data (important for some tests)
-    data = (series_clean - series_clean.mean()) / series_clean.std()
-    
-    # Run appropriate test
-    if test_type == 'shapiro':
-        # Shapiro-Wilk test
-        # Null hypothesis: data comes from a normal distribution
-        try:
-            stat, p_value = stats.shapiro(data)
-            results['statistic'] = stat
-            results['p_value'] = p_value
-            results['is_normal'] = p_value >= significance_level
-        except Exception as e:
-            logger.warning(f"Shapiro-Wilk test failed: {e}")
-            
-    elif test_type == 'ks':
-        # Kolmogorov-Smirnov test
-        # Null hypothesis: data comes from a normal distribution
-        try:
-            stat, p_value = stats.kstest(data, 'norm')
-            results['statistic'] = stat
-            results['p_value'] = p_value
-            results['is_normal'] = p_value >= significance_level
-        except Exception as e:
-            logger.warning(f"Kolmogorov-Smirnov test failed: {e}")
-            
-    elif test_type == 'jarque_bera':
-        # Jarque-Bera test
-        # Null hypothesis: data has skewness and kurtosis matching normal distribution
-        try:
-            stat, p_value = stats.jarque_bera(data)
-            results['statistic'] = stat
-            results['p_value'] = p_value
-            results['is_normal'] = p_value >= significance_level
-        except Exception as e:
-            logger.warning(f"Jarque-Bera test failed: {e}")
-            
-    elif test_type == 'anderson':
-        # Anderson-Darling test
-        # Critical values are for specific significance levels
-        try:
-            result = stats.anderson(data, 'norm')
-            results['statistic'] = result.statistic
-            
-            # Anderson-Darling test provides critical values at specific significance levels
-            # Index 2 corresponds to 5% significance level
-            results['critical_values'] = {
-                '15%': result.critical_values[0],
-                '10%': result.critical_values[1],
-                '5%': result.critical_values[2],
-                '2.5%': result.critical_values[3],
-                '1%': result.critical_values[4]
-            }
-            
-            # Check if statistic is less than critical value at specified significance level
-            # For Anderson-Darling, if statistic > critical value, we reject normality
-            critical_value = result.critical_values[2]  # 5% significance level
-            results['is_normal'] = result.statistic < critical_value
-        except Exception as e:
-            logger.warning(f"Anderson-Darling test failed: {e}")
-            
-    else:
-        raise ValueError(f"Invalid test type: {test_type}. Use 'shapiro', 'ks', 'jarque_bera', or 'anderson'")
-    
-    return results
-
-
-def test_autocorrelation(
-    series: pd.Series,
-    max_lag: int = 20,
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test for autocorrelation in time series.
-    
-    Args:
-        series: Time series to test
-        max_lag: Maximum lag to test
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with autocorrelation test results
-    """
-    # Remove NaN values
-    series_clean = series.dropna()
-    
-    # Calculate autocorrelation function
-    acf_values = acf(series_clean, nlags=max_lag, fft=True)
-    
-    # Calculate partial autocorrelation function
-    pacf_values = pacf(series_clean, nlags=max_lag, method='ols')
-    
-    # Calculate standard error (approximate)
-    n = len(series_clean)
-    se = 1.96 / np.sqrt(n)  # 95% confidence interval
-    
-    # Check for significant autocorrelation
-    significant_lags = []
-    for lag in range(1, max_lag + 1):
-        if abs(acf_values[lag]) > se:
-            significant_lags.append(lag)
-    
-    # Ljung-Box test for autocorrelation
-    from statsmodels.stats.diagnostic import acorr_ljungbox
-    
-    # Test at multiple lags
-    lb_results = acorr_ljungbox(series_clean, lags=range(1, max_lag + 1))
-    
-    # Extract test statistics and p-values
-    if hasattr(lb_results, 'iloc'):  # DataFrame output (newer statsmodels)
-        lb_stat = lb_results['lb_stat'].values
-        lb_pvalue = lb_results['lb_pvalue'].values
-    else:  # Tuple output (older statsmodels)
-        lb_stat, lb_pvalue = lb_results
-    
-    # Check if series is autocorrelated
-    is_autocorrelated = any(p < significance_level for p in lb_pvalue)
-    
-    # Compile results
-    results = {
-        'is_autocorrelated': is_autocorrelated,
-        'significant_lags': significant_lags,
-        'acf': acf_values[1:],  # Exclude lag 0 (always 1)
-        'pacf': pacf_values[1:],  # Exclude lag 0
-        'ljung_box_stat': lb_stat,
-        'ljung_box_pvalue': lb_pvalue,
-        'confidence_interval': se
-    }
-    
-    return results
-
-
-def test_heteroskedasticity(
-    series: pd.Series,
-    test_type: str = 'arch',
-    max_lag: int = 5,
-    significance_level: float = 0.05
-) -> Dict[str, Any]:
-    """
-    Test for heteroskedasticity (volatility clustering) in time series.
-    
-    Args:
-        series: Time series to test
-        test_type: Type of test ('arch', 'breusch_pagan', 'white')
-        max_lag: Maximum lag to test for ARCH effects
-        significance_level: Significance level for hypothesis testing
-        
-    Returns:
-        Dictionary with test results
-        
-    Raises:
-        ValueError: If an invalid test type is specified
-    """
-    # Remove NaN values
-    series_clean = series.dropna()
-    
-    results = {
-        'has_heteroskedasticity': None,
-        'test_statistic': None,
-        'p_value': None,
-        'lags_tested': max_lag
-    }
-    
-    if test_type == 'arch':
-        # ARCH LM test
-        # Null hypothesis: no ARCH effects
-        try:
-            from statsmodels.stats.diagnostic import het_arch
-            
-            arch_test = het_arch(series_clean, maxlag=max_lag)
-            results['test_statistic'] = arch_test[0]
-            results['p_value'] = arch_test[1]
-            results['has_heteroskedasticity'] = arch_test[1] < significance_level
-            
-        except Exception as e:
-            logger.warning(f"ARCH test failed: {e}")
-            
-    elif test_type == 'breusch_pagan':
-        # Breusch-Pagan test
-        # Null hypothesis: homoskedasticity
-        try:
-            from statsmodels.stats.diagnostic import het_breuschpagan
-            
-            # For Breusch-Pagan, we need to set up a regression model
-            # We'll use AR(1) model: y_t = a + b*y_{t-1} + e_t
-            y = series_clean
-            X = sm.add_constant(y.shift(1).dropna())
-            y = y.iloc[1:].reset_index(drop=True)
-            X = X.reset_index(drop=True)
-            
-            # Run OLS regression
-            model = sm.OLS(y, X).fit()
-            
-            # Run Breusch-Pagan test
-            bp_test = het_breuschpagan(model.resid, model.model.exog)
-            results['test_statistic'] = bp_test[0]
-            results['p_value'] = bp_test[1]
-            results['has_heteroskedasticity'] = bp_test[1] < significance_level
-            
-        except Exception as e:
-            logger.warning(f"Breusch-Pagan test failed: {e}")
-            
-    elif test_type == 'white':
-        # White's test
-        # Null hypothesis: homoskedasticity
-        try:
-            from statsmodels.stats.diagnostic import het_white
-            
-            # For White's test, we need to set up a regression model
-            # We'll use AR(1) model: y_t = a + b*y_{t-1} + e_t
-            y = series_clean
-            X = sm.add_constant(y.shift(1).dropna())
-            y = y.iloc[1:].reset_index(drop=True)
-            X = X.reset_index(drop=True)
-            
-            # Run OLS regression
-            model = sm.OLS(y, X).fit()
-            
-            # Run White's test
-            white_test = het_white(model.resid, model.model.exog)
-            results['test_statistic'] = white_test[0]
-            results['p_value'] = white_test[1]
-            results['has_heteroskedasticity'] = white_test[1] < significance_level
-            
-        except Exception as e:
-            logger.warning(f"White's test failed: {e}")
-            
-    else:
-        raise ValueError(f"Invalid test type: {test_type}. Use 'arch', 'breusch_pagan', or 'white'")
-    
-    return results
-
-
-#------------------------------------------------------------------------
-# Distribution Analysis
-#------------------------------------------------------------------------
-
-def calculate_moments(
-    series: pd.Series,
-    annualize: bool = False,
-    periods_per_year: int = 252
-) -> Dict[str, float]:
-    """
-    Calculate statistical moments of a distribution.
-    
-    Args:
-        series: Data series to analyze
-        annualize: Whether to annualize results for return data
-        periods_per_year: Number of periods per year for annualization
-        
-    Returns:
-        Dictionary with mean, variance, skewness, kurtosis and other stats
-    """
-    # Remove NaN values
-    data = series.dropna()
-    
-    if len(data) == 0:
-        return {
-            'count': 0,
-            'mean': np.nan,
-            'std': np.nan,
-            'variance': np.nan,
-            'skewness': np.nan,
-            'excess_kurtosis': np.nan,
-            'min': np.nan,
-            'max': np.nan,
-            'median': np.nan,
-            'mad': np.nan
-        }
-    
-    # Calculate basic statistics
-    count = len(data)
-    mean = data.mean()
-    std = data.std()
-    variance = data.var()
-    min_val = data.min()
-    max_val = data.max()
-    median = data.median()
-    mad = (data - median).abs().mean()  # Median Absolute Deviation
-    
-    # Calculate higher moments
-    skewness = stats.skew(data)
-    kurtosis = stats.kurtosis(data)  # Excess kurtosis (normal = 0)
-    
-    # Annualize if requested (for return data)
-    if annualize:
-        mean = mean * periods_per_year
-        variance = variance * periods_per_year
-        std = std * np.sqrt(periods_per_year)
-    
-    return {
-        'count': count,
-        'mean': mean,
-        'std': std,
-        'variance': variance,
-        'skewness': skewness,
-        'excess_kurtosis': kurtosis,
-        'min': min_val,
-        'max': max_val,
-        'median': median,
-        'mad': mad
-    }
-
-
-def fit_distribution(
-    data: Union[pd.Series, np.ndarray],
-    dist_family: str = 'norm',
-    n_samples: int = 1000,
-    test_fit: bool = True
-) -> Dict[str, Any]:
-    """
-    Fit a statistical distribution to data.
-    
-    Args:
-        data: Data series to fit
-        dist_family: Distribution family ('norm', 't', 'skewnorm', etc.)
-        n_samples: Number of samples for comparing fitted vs actual
-        test_fit: Whether to perform goodness-of-fit test
-        
-    Returns:
-        Dictionary with fitted parameters and goodness-of-fit
-        
-    Raises:
-        ValueError: If an invalid distribution family is specified
-    """
-    # Convert to numpy array if needed
-    if isinstance(data, pd.Series):
-        data = data.dropna().values
-    
-    # Check available distributions
-    available_dists = [
-        'norm', 't', 'skewnorm', 'cauchy', 'laplace',
-        'logistic', 'gennorm', 'gamma', 'expon', 'lognorm'
+    # Try to find any datetime-like column
+    datetime_cols = [
+        col for col in df.columns 
+        if any(time_kw in col.lower() for time_kw in ['time', 'date', 'dt', 'timestamp'])
     ]
     
-    if dist_family not in available_dists:
-        raise ValueError(f"Invalid distribution family: {dist_family}. Available: {available_dists}")
+    if datetime_cols:
+        potential_col = datetime_cols[0]
+        logger.warning(f"No '{timestamp_col}' found, using '{potential_col}' as timestamp")
+        df[potential_col] = pd.to_datetime(df[potential_col])
+        return df.set_index(potential_col)
     
-    # Get the distribution class
-    dist_class = getattr(stats, dist_family)
-    
-    # Fit the distribution
-    try:
-        params = dist_class.fit(data)
-        
-        # Generate results
-        results = {
-            'distribution': dist_family,
-            'params': params,
-            'mean': dist_class.mean(*params),
-            'variance': dist_class.var(*params),
-            'skewness': dist_class.stats(*params, moments='s'),
-            'kurtosis': dist_class.stats(*params, moments='k')
-        }
-        
-        # Test goodness of fit if requested
-        if test_fit:
-            # Generate samples from fitted distribution
-            samples = dist_class.rvs(*params, size=n_samples)
-            
-            # Perform KS test
-            ks_stat, ks_pvalue = stats.kstest(data, dist_family, params)
-            
-            # Calculate log-likelihood
-            loglik = np.sum(dist_class.logpdf(data, *params))
-            
-            # Calculate BIC and AIC
-            k = len(params)
-            n = len(data)
-            bic = k * np.log(n) - 2 * loglik
-            aic = 2 * k - 2 * loglik
-            
-            # Add fit statistics to results
-            results.update({
-                'ks_statistic': ks_stat,
-                'ks_pvalue': ks_pvalue,
-                'loglikelihood': loglik,
-                'aic': aic,
-                'bic': bic
-            })
-        
-        return results
-    
-    except Exception as e:
-        logger.warning(f"Failed to fit {dist_family} distribution: {e}")
-        return {'distribution': dist_family, 'error': str(e)}
+    raise ValueError(
+        f"No timestamp column found in DataFrame. Expected '{timestamp_col}' or "
+        f"column with 'time', 'date', 'dt', 'timestamp' in name."
+    )
 
 
-def estimate_tail_risk(
-    returns: pd.Series,
-    method: str = 'historical',
-    alpha: float = 0.05,
-    window: Optional[int] = None,
-    tail: str = 'left'
-) -> Dict[str, float]:
+def validate_ohlc(
+    df: pd.DataFrame, 
+    required_cols: List[str] = None,
+    rename_map: Dict[str, str] = None
+) -> pd.DataFrame:
     """
-    Estimate tail risk measures such as Value-at-Risk (VaR) and Expected Shortfall (ES).
+    Validate and standardize OHLC data format.
     
     Args:
-        returns: Return series
-        method: Method for estimation ('historical', 'parametric', 'ewma')
-        alpha: Significance level (e.g., 0.05 for 95% VaR)
-        window: Window size for rolling estimation (None for full sample)
-        tail: Which tail to analyze ('left' for losses, 'right' for gains)
+        df: Input DataFrame with price data
+        required_cols: List of required columns (default is ['close'])
+        rename_map: Dictionary mapping from original column names to standardized ones
         
     Returns:
-        Dictionary with tail risk measures
+        Standardized DataFrame with validated columns
         
     Raises:
-        ValueError: If an invalid method or tail is specified
+        ValueError: If required columns are missing and can't be inferred
     """
-    # Remove NaN values
-    returns_clean = returns.dropna()
+    # Default to requiring only 'close'
+    if required_cols is None:
+        required_cols = ['close']
     
-    # Validate inputs
-    if tail not in ['left', 'right']:
-        raise ValueError(f"Invalid tail: {tail}. Use 'left' or 'right'")
+    # Make a copy to avoid modifying original
+    df = df.copy()
     
-    # Adjust for tail direction
-    if tail == 'left':
-        # Analyzing losses, so negative returns are in the left tail
-        q = alpha
-    else:
-        # Analyzing gains, so positive returns are in the right tail
-        q = 1 - alpha
+    # List of standard column names
+    standard_cols = ['open', 'high', 'low', 'close', 'volume']
     
-    # Implement different VaR/ES methods
-    if method == 'historical':
-        # Historical simulation method
-        var = returns_clean.quantile(q)
-        
-        if tail == 'left':
-            es_values = returns_clean[returns_clean <= var]
-        else:
-            es_values = returns_clean[returns_clean >= var]
-        
-        es = es_values.mean() if len(es_values) > 0 else var
-        
-    elif method == 'parametric':
-        # Parametric method (Gaussian approximation)
-        mean = returns_clean.mean()
-        std = returns_clean.std()
-        
-        # Calculate VaR
-        z_score = stats.norm.ppf(q)
-        var = mean + z_score * std
-        
-        # Calculate ES
-        if tail == 'left':
-            es = mean - std * stats.norm.pdf(z_score) / alpha
-        else:
-            es = mean + std * stats.norm.pdf(z_score) / alpha
-        
-    elif method == 'ewma':
-        # Exponentially Weighted Moving Average for volatility
-        if window is None:
-            window = min(len(returns_clean), 60)  # Default to 60 periods
-        
-        # Calculate EWMA variance
-        decay = 0.94  # RiskMetrics standard
-        vol = np.sqrt(returns_clean.ewm(alpha=1-decay).var())
-        
-        # Calculate VaR
-        mean = returns_clean.ewm(alpha=1-decay).mean()
-        z_score = stats.norm.ppf(q)
-        var = mean.iloc[-1] + z_score * vol.iloc[-1]
-        
-        # Calculate ES
-        if tail == 'left':
-            es = mean.iloc[-1] - vol.iloc[-1] * stats.norm.pdf(z_score) / alpha
-        else:
-            es = mean.iloc[-1] + vol.iloc[-1] * stats.norm.pdf(z_score) / alpha
-        
-    else:
-        raise ValueError(f"Invalid method: {method}. Use 'historical', 'parametric', or 'ewma'")
-    
-    # Create result dictionary
-    name_suffix = "VaR" if tail == 'left' else "gain_VaR"
-    es_name = "ES" if tail == 'left' else "gain_ES"
-    
-    results = {
-        f"{int((1-alpha)*100)}%_{name_suffix}": var,
-        f"{int((1-alpha)*100)}%_{es_name}": es,
-        'alpha': alpha,
-        'method': method
+    # Common alternative column names
+    alt_names = {
+        'open': ['o', 'Open', 'OPEN', 'opening_price', 'price_open'],
+        'high': ['h', 'High', 'HIGH', 'max_price', 'price_high', 'highest'],
+        'low': ['l', 'Low', 'LOW', 'min_price', 'price_low', 'lowest'],
+        'close': ['c', 'Close', 'CLOSE', 'price', 'last', 'price_close', 'closing_price'],
+        'volume': ['v', 'Volume', 'VOLUME', 'vol', 'size', 'quantity']
     }
     
-    return results
+    # Apply custom rename map first if provided
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    
+    # Try to infer column names if not in standard format
+    for std_col in standard_cols:
+        if std_col not in df.columns:
+            found = False
+            # Try alternative names
+            for alt in alt_names[std_col]:
+                if alt in df.columns:
+                    df[std_col] = df[alt]
+                    found = True
+                    break
+            
+            if not found and std_col in required_cols:
+                raise ValueError(f"Required column '{std_col}' not found in DataFrame")
+    
+    # Validate data types
+    for col in [c for c in standard_cols if c in df.columns]:
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            logger.warning(f"Column '{col}' is not numeric. Attempting to convert.")
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Check for NaN values in required columns
+    for col in required_cols:
+        nan_count = df[col].isna().sum()
+        if nan_count > 0:
+            pct_nan = 100 * nan_count / len(df)
+            logger.warning(f"Column '{col}' has {nan_count} NaN values ({pct_nan:.2f}%)")
+    
+    return df
 
 
-#------------------------------------------------------------------------
-# Financial Performance Metrics
-#------------------------------------------------------------------------
-
-def calculate_sharpe_ratio(
-    returns: pd.Series,
-    risk_free_rate: float = 0.0,
-    periods_per_year: int = 252,
-    negative_sharpe: bool = True
-) -> float:
+def filter_time_range(
+    df: pd.DataFrame,
+    start_date: Union[str, datetime, pd.Timestamp] = None,
+    end_date: Union[str, datetime, pd.Timestamp] = None,
+    inclusive: str = 'both'
+) -> pd.DataFrame:
     """
-    Calculate Sharpe ratio for a return series.
+    Filter DataFrame to a specific time range.
     
     Args:
-        returns: Return series
-        risk_free_rate: Risk-free rate (annualized)
-        periods_per_year: Number of periods per year
-        negative_sharpe: Whether to allow negative Sharpe ratios
+        df: Input DataFrame with datetime index
+        start_date: Start date for the filter
+        end_date: End date for the filter
+        inclusive: Whether to include start/end in the range ('both', 'left', 'right', 'neither')
         
     Returns:
-        Sharpe ratio
-    """
-    # Remove NaN values
-    returns_clean = returns.dropna()
-    
-    if len(returns_clean) == 0:
-        return np.nan
-    
-    # Adjust risk-free rate to match return frequency
-    rf_per_period = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
-    
-    # Calculate excess returns
-    excess_returns = returns_clean - rf_per_period
-    
-    # Calculate mean and std of excess returns
-    mean_excess = excess_returns.mean()
-    std_excess = excess_returns.std()
-    
-    # Calculate Sharpe ratio
-    if std_excess == 0:
-        return np.nan
-    
-    sharpe = mean_excess / std_excess * np.sqrt(periods_per_year)
-    
-    # Adjust negative Sharpe if requested
-    if not negative_sharpe and sharpe < 0:
-        return 0.0
-    
-    return sharpe
-
-
-def calculate_sortino_ratio(
-    returns: pd.Series,
-    risk_free_rate: float = 0.0,
-    periods_per_year: int = 252,
-    target_return: Optional[float] = None,
-    negative_sortino: bool = True
-) -> float:
-    """
-    Calculate Sortino ratio for a return series.
-    
-    Args:
-        returns: Return series
-        risk_free_rate: Risk-free rate (annualized)
-        periods_per_year: Number of periods per year
-        target_return: Target return (if None, use risk-free rate)
-        negative_sortino: Whether to allow negative Sortino ratios
-        
-    Returns:
-        Sortino ratio
-    """
-    # Remove NaN values
-    returns_clean = returns.dropna()
-    
-    if len(returns_clean) == 0:
-        return np.nan
-    
-    # Adjust risk-free rate to match return frequency
-    rf_per_period = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
-    
-    # Set target return
-    if target_return is None:
-        target_return = rf_per_period
-    
-    # Calculate excess returns
-    excess_returns = returns_clean - target_return
-    
-    # Calculate mean excess return
-    mean_excess = excess_returns.mean()
-    
-    # Calculate downside deviation (only consider returns below target)
-    downside_returns = excess_returns[excess_returns < 0]
-    if len(downside_returns) == 0:
-        # No downside returns - perfect Sortino
-        return np.inf
-    
-    downside_deviation = np.sqrt(np.mean(downside_returns ** 2))
-    
-    if downside_deviation == 0:
-        return np.nan
-    
-    # Calculate Sortino ratio
-    sortino = mean_excess / downside_deviation * np.sqrt(periods_per_year)
-    
-    # Adjust negative Sortino if requested
-    if not negative_sortino and sortino < 0:
-        return 0.0
-    
-    return sortino
-
-
-def calculate_calmar_ratio(
-    returns: pd.Series,
-    periods_per_year: int = 252,
-    max_dd_method: str = 'returns',
-    window: Optional[int] = None
-) -> float:
-    """
-    Calculate Calmar ratio for a return series.
-    
-    Args:
-        returns: Return series
-        periods_per_year: Number of periods per year
-        max_dd_method: Method to calculate maximum drawdown ('returns' or 'prices')
-        window: Window for max drawdown calculation (None for full sample)
-        
-    Returns:
-        Calmar ratio
+        Filtered DataFrame
         
     Raises:
-        ValueError: If an invalid max_dd_method is specified
+        TypeError: If DataFrame doesn't have a datetime index
     """
-    # Remove NaN values
-    returns_clean = returns.dropna()
+    # Ensure datetime index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index for time filtering")
     
-    if len(returns_clean) == 0:
-        return np.nan
+    # Convert string dates to timestamps
+    if start_date is not None and isinstance(start_date, str):
+        start_date = pd.Timestamp(start_date)
+    if end_date is not None and isinstance(end_date, str):
+        end_date = pd.Timestamp(end_date)
     
-    # Calculate annualized return
-    annual_return = returns_clean.mean() * periods_per_year
+    # Default to entire range if nothing specified
+    if start_date is None and end_date is None:
+        return df
     
-    # Calculate maximum drawdown
-    if max_dd_method == 'returns':
-        # Calculate cumulative returns
-        cum_returns = (1 + returns_clean).cumprod()
-        
-        # Limit to window if specified
-        if window is not None:
-            cum_returns = cum_returns.iloc[-window:]
-        
-        # Calculate running maximum
-        running_max = cum_returns.cummax()
-        
-        # Calculate drawdowns
-        drawdowns = (cum_returns / running_max) - 1
-        
-        # Get maximum drawdown
-        max_dd = drawdowns.min()
-        
-    elif max_dd_method == 'prices':
-        # Treat return series as price series directly
-        prices = returns_clean
-        
-        # Limit to window if specified
-        if window is not None:
-            prices = prices.iloc[-window:]
-        
-        # Calculate running maximum
-        running_max = prices.cummax()
-        
-        # Calculate drawdowns
-        drawdowns = (prices / running_max) - 1
-        
-        # Get maximum drawdown
-        max_dd = drawdowns.min()
-        
-    else:
-        raise ValueError(f"Invalid max_dd_method: {max_dd_method}. Use 'returns' or 'prices'")
+    # Create the mask based on the specified range
+    if start_date is not None and end_date is not None:
+        if inclusive == 'both':
+            mask = (df.index >= start_date) & (df.index <= end_date)
+        elif inclusive == 'left':
+            mask = (df.index >= start_date) & (df.index < end_date)
+        elif inclusive == 'right':
+            mask = (df.index > start_date) & (df.index <= end_date)
+        else:  # 'neither'
+            mask = (df.index > start_date) & (df.index < end_date)
+    elif start_date is not None:
+        mask = df.index >= start_date
+    else:  # end_date is not None
+        mask = df.index <= end_date
     
-    # Check for zero drawdown
-    if max_dd == 0:
-        return np.inf
+    # Apply the filter
+    filtered_df = df[mask]
     
-    # Calculate Calmar ratio
-    calmar = annual_return / abs(max_dd)
+    # Log the filtering results
+    logger.debug(
+        f"Filtered from {len(df)} to {len(filtered_df)} rows "
+        f"({100 * len(filtered_df) / len(df):.1f}% retained)"
+    )
     
-    return calmar
+    return filtered_df
 
 
-def calculate_information_ratio(
-    returns: pd.Series,
-    benchmark_returns: pd.Series,
-    periods_per_year: int = 252
-) -> float:
+def detect_frequency(df: pd.DataFrame) -> str:
     """
-    Calculate Information Ratio for a return series versus a benchmark.
+    Detect the frequency of time series data.
     
     Args:
-        returns: Return series
-        benchmark_returns: Benchmark return series
-        periods_per_year: Number of periods per year
+        df: Input DataFrame with datetime index
         
     Returns:
-        Information Ratio
+        Inferred frequency as pandas frequency string
+        
+    Raises:
+        TypeError: If DataFrame doesn't have a datetime index
     """
-    # Align series and remove NaNs
-    returns_clean, benchmark_clean = returns.align(benchmark_returns, join='inner')
-    returns_clean = returns_clean.dropna()
-    benchmark_clean = benchmark_clean.dropna()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index to detect frequency")
     
-    if len(returns_clean) == 0:
-        return np.nan
+    # Try pandas infer_freq first
+    freq = pd.infer_freq(df.index)
     
-    # Calculate tracking error
-    tracking_diff = returns_clean - benchmark_clean
-    tracking_error = tracking_diff.std()
+    if freq is not None:
+        return freq
     
-    if tracking_error == 0:
-        return np.nan
+    # Calculate time deltas and get the most common
+    if len(df) > 1:
+        # Get time differences
+        time_diffs = df.index.to_series().diff().dropna()
+        
+        if not time_diffs.empty:
+            # Find the most common difference
+            most_common_diff = time_diffs.value_counts().idxmax()
+            
+            # Convert to pandas frequency string (approximate)
+            seconds = most_common_diff.total_seconds()
+            
+            if seconds < 60:
+                return f"{int(seconds)}S"
+            elif seconds < 3600:
+                return f"{int(seconds/60)}T"
+            elif seconds < 86400:
+                return f"{int(seconds/3600)}H"
+            elif 86400 <= seconds < 604800:
+                return f"{int(seconds/86400)}D"
+            elif 604800 <= seconds < 2592000:
+                return f"{int(seconds/604800)}W"
+            else:
+                return f"{int(seconds/2592000)}M"
     
-    # Calculate Information Ratio
-    information_ratio = tracking_diff.mean() / tracking_error * np.sqrt(periods_per_year)
+    logger.warning("Could not infer frequency from data")
+    return None
+
+
+def resample_data(
+    df: pd.DataFrame, 
+    freq: str,
+    agg_dict: Dict[str, str] = None
+) -> pd.DataFrame:
+    """
+    Resample time series data to a specified frequency.
     
-    return information_ratio
+    Args:
+        df: Input DataFrame with datetime index
+        freq: Target frequency (e.g., '1D', '1H', '15T')
+        agg_dict: Dictionary of column:aggregation mappings
+        
+    Returns:
+        Resampled DataFrame
+        
+    Raises:
+        TypeError: If DataFrame doesn't have a datetime index
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index for resampling")
+    
+    # Default aggregation for OHLCV data
+    if agg_dict is None:
+        agg_dict = {
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }
+    
+    # Filter to only include columns that exist in the DataFrame
+    agg_dict = {k: v for k, v in agg_dict.items() if k in df.columns}
+    
+    # Ensure we have at least one column to aggregate
+    if not agg_dict:
+        raise ValueError(
+            "No valid columns for aggregation. Provide an agg_dict with "
+            "mappings for columns that exist in the DataFrame."
+        )
+    
+    # Perform the resampling
+    resampled = df.resample(freq).agg(agg_dict)
+    
+    # Log the resampling results
+    logger.debug(
+        f"Resampled from {len(df)} to {len(resampled)} rows "
+        f"(frequency: {freq})"
+    )
+    
+    return resampled
+
+
+def align_dataframes(
+    dfs: List[pd.DataFrame],
+    method: str = 'outer',
+    fill_method: str = None,
+    freq: str = None
+) -> List[pd.DataFrame]:
+    """
+    Align multiple DataFrames to a common time index.
+    
+    Args:
+        dfs: List of DataFrames with datetime indices
+        method: Join method ('outer', 'inner', 'left', 'right')
+        fill_method: Method for filling missing values (None, 'ffill', 'bfill', 'nearest')
+        freq: Optional frequency to resample all DataFrames to
+        
+    Returns:
+        List of aligned DataFrames
+        
+    Raises:
+        TypeError: If any DataFrame doesn't have a datetime index
+    """
+    # Validate inputs
+    for i, df in enumerate(dfs):
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise TypeError(f"DataFrame {i} must have a datetime index for alignment")
+    
+    # Resample to common frequency if specified
+    if freq is not None:
+        resampled_dfs = []
+        for df in dfs:
+            # Detect columns and appropriate aggregation methods
+            cols = df.columns
+            agg_dict = {}
+            
+            for col in cols:
+                if any(price_kw in col.lower() for price_kw in ['open', 'first', 'start']):
+                    agg_dict[col] = 'first'
+                elif any(price_kw in col.lower() for price_kw in ['high', 'max']):
+                    agg_dict[col] = 'max'
+                elif any(price_kw in col.lower() for price_kw in ['low', 'min']):
+                    agg_dict[col] = 'min'
+                elif any(price_kw in col.lower() for price_kw in ['close', 'last', 'end']):
+                    agg_dict[col] = 'last'
+                elif any(vol_kw in col.lower() for vol_kw in ['volume', 'qty', 'amount', 'size']):
+                    agg_dict[col] = 'sum'
+                else:
+                    agg_dict[col] = 'last'  # Default to last
+                
+            resampled_dfs.append(df.resample(freq).agg(agg_dict))
+        
+        dfs = resampled_dfs
+    
+    # Determine the reference index based on the join method
+    if method == 'outer':
+        # Union of all indices
+        ref_index = dfs[0].index
+        for df in dfs[1:]:
+            ref_index = ref_index.union(df.index)
+    elif method == 'inner':
+        # Intersection of all indices
+        ref_index = dfs[0].index
+        for df in dfs[1:]:
+            ref_index = ref_index.intersection(df.index)
+    elif method == 'left':
+        # Use the first DataFrame's index
+        ref_index = dfs[0].index
+    elif method == 'right':
+        # Use the last DataFrame's index
+        ref_index = dfs[-1].index
+    else:
+        raise ValueError(f"Invalid join method: {method}")
+    
+    # Reindex all DataFrames to the reference index
+    aligned_dfs = []
+    for df in dfs:
+        aligned_df = df.reindex(ref_index)
+        
+        # Apply fill method if specified
+        if fill_method == 'ffill':
+            aligned_df = aligned_df.ffill()
+        elif fill_method == 'bfill':
+            aligned_df = aligned_df.bfill()
+        elif fill_method == 'nearest':
+            aligned_df = aligned_df.interpolate(method='nearest')
+        
+        aligned_dfs.append(aligned_df)
+    
+    return aligned_dfs
+
+
+#------------------------------------------------------------------------
+# Return Calculation
+#------------------------------------------------------------------------
+
+def calculate_returns(
+    prices: Union[pd.Series, pd.DataFrame],
+    method: str = 'log',
+    periods: int = 1,
+    col_name: str = None,
+    dropna: bool = False
+) -> Union[pd.Series, pd.DataFrame]:
+    """
+    Calculate returns from price data.
+    
+    Args:
+        prices: Price data (Series or DataFrame)
+        method: Return calculation method ('log', 'pct', 'diff', 'ratio')
+        periods: Number of periods to shift for return calculation
+        col_name: Column name if prices is a DataFrame
+        dropna: Whether to drop NaN values
+        
+    Returns:
+        Series or DataFrame with calculated returns
+        
+    Raises:
+        ValueError: If an invalid method is specified
+    """
+    # Input validation
+    if method not in ['log', 'pct', 'diff', 'ratio']:
+        raise ValueError(f"Invalid return method: {method}. Use 'log', 'pct', 'diff', or 'ratio'")
+    
+    # Extract Series from DataFrame if column specified
+    if isinstance(prices, pd.DataFrame) and col_name is not None:
+        if col_name not in prices.columns:
+            raise ValueError(f"Column '{col_name}' not found in DataFrame")
+        price_data = prices[col_name]
+    else:
+        price_data = prices
+    
+    # Calculate returns based on specified method
+    if method == 'log':
+        returns = np.log(price_data / price_data.shift(periods))
+    elif method == 'pct':
+        returns = price_data.pct_change(periods=periods)
+    elif method == 'diff':
+        returns = price_data.diff(periods=periods)
+    elif method == 'ratio':
+        returns = price_data / price_data.shift(periods)
+    
+    # Drop NaN values if requested
+    if dropna:
+        if isinstance(returns, pd.DataFrame):
+            returns = returns.dropna()
+        else:
+            returns = returns.dropna()
+    
+    return returns
+
+
+def annualize_returns(
+    returns: Union[pd.Series, pd.DataFrame],
+    periods_per_year: int = 252,
+    compound: bool = True
+) -> Union[float, pd.Series, pd.DataFrame]:
+    """
+    Annualize returns based on frequency.
+    
+    Args:
+        returns: Return data (can be Series, DataFrame, or scalar)
+        periods_per_year: Number of periods in a year (252 for daily, 12 for monthly, etc.)
+        compound: Whether to use compound annualization (geometric) or simple (arithmetic)
+        
+    Returns:
+        Annualized returns (same type as input)
+    """
+    if isinstance(returns, (pd.Series, pd.DataFrame)):
+        if compound:
+            if isinstance(returns, pd.Series):
+                # For Series, we can directly apply the formula
+                return (1 + returns).prod() ** (periods_per_year / len(returns)) - 1
+            else:
+                # For DataFrames, apply to each column
+                return returns.apply(lambda col: (1 + col).prod() ** (periods_per_year / len(col)) - 1)
+        else:
+            # Simple annualization (arithmetic)
+            return returns.mean() * periods_per_year
+    else:
+        # Assume returns is a scalar representing a periodic return
+        if compound:
+            return (1 + returns) ** periods_per_year - 1
+        else:
+            return returns * periods_per_year
+
+
+def calculate_cumulative_returns(
+    returns: Union[pd.Series, pd.DataFrame],
+    starting_value: float = 1.0,
+    log_returns: bool = False
+) -> Union[pd.Series, pd.DataFrame]:
+    """
+    Calculate cumulative returns from a return series.
+    
+    Args:
+        returns: Return data
+        starting_value: Initial investment value
+        log_returns: Whether input returns are log returns
+        
+    Returns:
+        Series or DataFrame with cumulative returns
+    """
+    if log_returns:
+        # For log returns: exp(sum(r))
+        if isinstance(returns, pd.DataFrame):
+            return starting_value * np.exp(returns.cumsum())
+        else:
+            return starting_value * np.exp(returns.cumsum())
+    else:
+        # For percentage returns: prod(1+r)
+        if isinstance(returns, pd.DataFrame):
+            return starting_value * (1 + returns).cumprod()
+        else:
+            return starting_value * (1 + returns).cumprod()
 
 
 def calculate_drawdowns(
-    returns: pd.Series,
-    calculate_recovery: bool = True
-) -> pd.DataFrame:
+    returns: Union[pd.Series, pd.DataFrame],
+    log_returns: bool = False
+) -> Union[pd.Series, pd.DataFrame]:
     """
-    Calculate drawdowns from a return series.
+    Calculate drawdowns from return series.
     
     Args:
-        returns: Return series
-        calculate_recovery: Whether to calculate recovery periods
+        returns: Return data
+        log_returns: Whether input returns are log returns
         
     Returns:
-        DataFrame with drawdown information
+        Series or DataFrame with drawdowns
     """
-    # Remove NaN values
-    returns_clean = returns.dropna()
-    
-    if len(returns_clean) == 0:
-        return pd.DataFrame()
-    
     # Calculate cumulative returns
-    cum_returns = (1 + returns_clean).cumprod()
+    cumulative = calculate_cumulative_returns(returns, log_returns=log_returns)
     
     # Calculate running maximum
-    running_max = cum_returns.cummax()
+    running_max = cumulative.cummax()
     
-    # Calculate drawdowns
-    drawdowns = (cum_returns / running_max) - 1
+    # Drawdowns as percentage from peak
+    drawdowns = (cumulative / running_max) - 1
     
-    # Create DataFrame for results
-    result = pd.DataFrame({
-        'returns': returns_clean,
-        'cum_returns': cum_returns,
-        'drawdown': drawdowns
-    })
-    
-    # Find drawdown periods
-    is_drawdown = result['drawdown'] < 0
-    
-    # Calculate underwater periods (consecutive drawdown)
-    result['is_drawdown'] = is_drawdown
-    result['drawdown_group'] = (result['is_drawdown'] != result['is_drawdown'].shift()).cumsum()
-    
-    # Calculate start and end of each drawdown
-    drawdown_periods = []
-    
-    # Extract unique drawdown periods
-    for group_id, group_df in result[result['is_drawdown']].groupby('drawdown_group'):
-        # Only include actual drawdowns
-        if not group_df.empty and group_df['drawdown'].min() < 0:
-            start_date = group_df.index[0]
-            end_date = group_df.index[-1]
-            max_drawdown = group_df['drawdown'].min()
-            max_drawdown_date = group_df['drawdown'].idxmin()
-            
-            recovery_date = None
-            recovery_periods = np.nan
-            
-            # Calculate recovery if requested and not in the most recent drawdown
-            if calculate_recovery and end_date != result.index[-1]:
-                # Find when we next reach the previous peak
-                peak_value = running_max.loc[start_date]
-                future_df = cum_returns.loc[end_date:]
-                recovery_dates = future_df[future_df >= peak_value].index
-                
-                if len(recovery_dates) > 0:
-                    recovery_date = recovery_dates[0]
-                    recovery_periods = len(result.loc[end_date:recovery_date]) - 1
-            
-            drawdown_periods.append({
-                'start_date': start_date,
-                'maxdd_date': max_drawdown_date,
-                'end_date': end_date,
-                'recovery_date': recovery_date,
-                'max_drawdown': max_drawdown,
-                'drawdown_length': len(group_df),
-                'recovery_length': recovery_periods
-            })
-    
-    drawdown_df = pd.DataFrame(drawdown_periods)
-    
-    if len(drawdown_df) > 0:
-        # Sort by drawdown magnitude
-        drawdown_df = drawdown_df.sort_values('max_drawdown')
-    
-    return drawdown_df
-
-
-def calculate_trade_metrics(
-    trades: pd.DataFrame,
-    pnl_col: str = 'pnl',
-    win_threshold: float = 0.0
-) -> Dict[str, float]:
-    """
-    Calculate trading metrics from a list of trades.
-    
-    Args:
-        trades: DataFrame with trade information
-        pnl_col: Name of column with profit/loss values
-        win_threshold: Threshold for considering a trade a win
-        
-    Returns:
-        Dictionary with trading metrics
-    """
-    # Validate input
-    if pnl_col not in trades.columns:
-        raise ValueError(f"PnL column '{pnl_col}' not found in trades DataFrame")
-    
-    # Extract relevant data
-    pnl = trades[pnl_col]
-    
-    # Basic metrics
-    total_trades = len(trades)
-    win_trades = (pnl > win_threshold).sum()
-    loss_trades = (pnl <= win_threshold).sum()
-    win_rate = win_trades / total_trades if total_trades > 0 else np.nan
-    
-    # PnL metrics
-    total_pnl = pnl.sum()
-    avg_pnl = pnl.mean()
-    
-    # Separate winning and losing trades
-    wins = pnl[pnl > win_threshold]
-    losses = pnl[pnl <= win_threshold]
-    
-    # Average win and loss
-    avg_win = wins.mean() if len(wins) > 0 else np.nan
-    avg_loss = losses.mean() if len(losses) > 0 else np.nan
-    
-    # Profit factor
-    gross_profit = wins.sum() if len(wins) > 0 else 0
-    gross_loss = abs(losses.sum()) if len(losses) > 0 else 0
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
-    
-    # Win/loss ratio
-    win_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else np.inf
-    
-    # Expected payoff
-    expected_payoff = win_rate * avg_win + (1 - win_rate) * avg_loss if win_rate is not np.nan else np.nan
-    
-    # Maximum consecutive wins and losses
-    consecutive_wins = 0
-    max_consecutive_wins = 0
-    consecutive_losses = 0
-    max_consecutive_losses = 0
-    
-    for p in pnl:
-        if p > win_threshold:  # Win
-            consecutive_wins += 1
-            consecutive_losses = 0
-            max_consecutive_wins = max(max_consecutive_wins, consecutive_wins)
-        else:  # Loss
-            consecutive_wins = 0
-            consecutive_losses += 1
-            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
-    
-    # Compile results
-    metrics = {
-        'total_trades': total_trades,
-        'win_trades': win_trades,
-        'loss_trades': loss_trades,
-        'win_rate': win_rate,
-        'total_pnl': total_pnl,
-        'avg_pnl': avg_pnl,
-        'avg_win': avg_win,
-        'avg_loss': avg_loss,
-        'profit_factor': profit_factor,
-        'win_loss_ratio': win_loss_ratio,
-        'expected_payoff': expected_payoff,
-        'max_consecutive_wins': max_consecutive_wins,
-        'max_consecutive_losses': max_consecutive_losses
-    }
-    
-    return metrics
+    return drawdowns
 
 
 #------------------------------------------------------------------------
-# Regression and Predictive Analysis
+# Feature Engineering
 #------------------------------------------------------------------------
 
-def run_linear_regression(
-    X: Union[pd.Series, pd.DataFrame],
-    y: pd.Series,
-    add_constant: bool = True,
-    robust: bool = False
-) -> Dict[str, Any]:
+def add_technical_features(
+    df: pd.DataFrame,
+    price_col: str = 'close',
+    volume_col: str = 'volume',
+    window: int = 20,
+    include: List[str] = None
+) -> pd.DataFrame:
     """
-    Run linear regression and return comprehensive statistics.
+    Add common technical indicators as features.
     
     Args:
-        X: Independent variable(s) (feature)
-        y: Dependent variable (target)
-        add_constant: Whether to add a constant term
-        robust: Whether to use robust regression (for outliers)
+        df: Input DataFrame with price data
+        price_col: Column name for price data
+        volume_col: Column name for volume data
+        window: Window size for indicators
+        include: List of indicators to include (defaults to all)
         
     Returns:
-        Dictionary with regression results
-    """
-    # Convert Series to DataFrame for consistency
-    if isinstance(X, pd.Series):
-        X = X.to_frame()
-    
-    # Align data
-    X_aligned, y_aligned = X.align(y, join='inner', axis=0)
-    
-    # Check for empty data
-    if len(X_aligned) == 0 or len(y_aligned) == 0:
-        logger.warning("No aligned data for regression")
-        return {
-            'coefficients': {},
-            'r_squared': np.nan,
-            'adj_r_squared': np.nan,
-            'f_statistic': np.nan,
-            'f_pvalue': np.nan,
-            'model': None
-        }
-    
-    # Add constant if requested
-    if add_constant:
-        X_aligned = sm.add_constant(X_aligned)
-    
-    try:
-        # Fit model
-        if robust:
-            # Robust regression
-            model = sm.RLM(y_aligned, X_aligned)
-            results = model.fit()
-            
-            # Get parameters (some stats are not available for robust regression)
-            params = results.params
-            
-            # Create coefficient dictionary
-            coefficients = dict(zip(X_aligned.columns, params))
-            
-            regression_stats = {
-                'coefficients': coefficients,
-                'r_squared': np.nan,  # Not available for robust regression
-                'adj_r_squared': np.nan,
-                'f_statistic': np.nan,
-                'f_pvalue': np.nan,
-                'model': results
-            }
-            
-        else:
-            # OLS regression
-            model = sm.OLS(y_aligned, X_aligned)
-            results = model.fit()
-            
-            # Get parameters
-            params = results.params
-            pvalues = results.pvalues
-            conf_int = results.conf_int()
-            
-            # Create coefficient dictionary with additional stats
-            coefficients = {
-                col: {
-                    'value': params[i],
-                    'p_value': pvalues[i],
-                    'conf_low': conf_int[0][i],
-                    'conf_high': conf_int[1][i],
-                    'significant': pvalues[i] < 0.05
-                }
-                for i, col in enumerate(X_aligned.columns)
-            }
-            
-            regression_stats = {
-                'coefficients': coefficients,
-                'r_squared': results.rsquared,
-                'adj_r_squared': results.rsquared_adj,
-                'f_statistic': results.fvalue,
-                'f_pvalue': results.f_pvalue,
-                'aic': results.aic,
-                'bic': results.bic,
-                'model': results
-            }
+        DataFrame with added technical features
         
-        return regression_stats
-    
-    except Exception as e:
-        logger.warning(f"Regression failed: {e}")
-        return {
-            'coefficients': {},
-            'r_squared': np.nan,
-            'adj_r_squared': np.nan,
-            'f_statistic': np.nan,
-            'f_pvalue': np.nan,
-            'error': str(e),
-            'model': None
-        }
-
-
-def calculate_regression_metrics(
-    y_true: Union[pd.Series, np.ndarray],
-    y_pred: Union[pd.Series, np.ndarray]
-) -> Dict[str, float]:
+    Raises:
+        ValueError: If required columns are missing
     """
-    Calculate regression performance metrics.
+    # Validate required columns
+    if price_col not in df.columns:
+        raise ValueError(f"Price column '{price_col}' not found in DataFrame")
+    
+    # All available indicators
+    all_indicators = [
+        'returns', 'ma', 'ema', 'momentum', 'volatility',
+        'rsi', 'macd', 'bb_upper', 'bb_lower', 'bb_width'
+    ]
+    
+    # If volume is available, add volume indicators
+    if volume_col in df.columns:
+        all_indicators.extend(['volume_ma', 'volume_ratio', 'obv'])
+    
+    # Filter indicators if specified
+    indicators = all_indicators if include is None else [ind for ind in include if ind in all_indicators]
+    
+    # Make a copy to avoid modifying original
+    result = df.copy()
+    
+    # Calculate returns if needed for indicators or explicitly requested
+    if 'returns' in indicators or any(ind in indicators for ind in ['momentum', 'volatility', 'rsi']):
+        result['returns'] = calculate_returns(result[price_col], method='pct')
+        
+        # Remove from indicators if only needed as input, not explicitly requested
+        if 'returns' not in indicators:
+            indicators.append('returns')
+    
+    # Calculate requested indicators
+    if 'ma' in indicators:
+        result[f'ma_{window}'] = result[price_col].rolling(window=window).mean()
+    
+    if 'ema' in indicators:
+        result[f'ema_{window}'] = result[price_col].ewm(span=window).mean()
+    
+    if 'momentum' in indicators:
+        result[f'momentum_{window}'] = result[price_col] / result[price_col].shift(window) - 1
+    
+    if 'volatility' in indicators:
+        result[f'volatility_{window}'] = result['returns'].rolling(window=window).std() * np.sqrt(252)
+    
+    if 'rsi' in indicators:
+        # Calculate gains and losses
+        delta = result[price_col].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        
+        # Calculate average gain and loss
+        avg_gain = gain.rolling(window=window).mean()
+        avg_loss = loss.rolling(window=window).mean()
+        
+        # Calculate RS and RSI
+        rs = avg_gain / avg_loss
+        result[f'rsi_{window}'] = 100 - (100 / (1 + rs))
+    
+    if 'macd' in indicators:
+        # Calculate MACD components
+        fast_ema = result[price_col].ewm(span=12).mean()
+        slow_ema = result[price_col].ewm(span=26).mean()
+        result['macd'] = fast_ema - slow_ema
+        result['macd_signal'] = result['macd'].ewm(span=9).mean()
+        result['macd_hist'] = result['macd'] - result['macd_signal']
+    
+    if any(bb in indicators for bb in ['bb_upper', 'bb_lower', 'bb_width']):
+        # Calculate Bollinger Bands
+        ma = result[price_col].rolling(window=window).mean()
+        std = result[price_col].rolling(window=window).std()
+        
+        if 'bb_upper' in indicators:
+            result[f'bb_upper_{window}'] = ma + (2 * std)
+        
+        if 'bb_lower' in indicators:
+            result[f'bb_lower_{window}'] = ma - (2 * std)
+        
+        if 'bb_width' in indicators:
+            upper = ma + (2 * std)
+            lower = ma - (2 * std)
+            result[f'bb_width_{window}'] = (upper - lower) / ma
+    
+    # Volume-based indicators
+    if volume_col in df.columns:
+        if 'volume_ma' in indicators:
+            result[f'volume_ma_{window}'] = result[volume_col].rolling(window=window).mean()
+        
+        if 'volume_ratio' in indicators:
+            result[f'volume_ratio_{window}'] = result[volume_col] / result[volume_col].rolling(window=window).mean()
+        
+        if 'obv' in indicators:
+            # Calculate On-Balance Volume
+            result['obv'] = np.where(
+                result[price_col] > result[price_col].shift(1),
+                result[volume_col],
+                np.where(
+                    result[price_col] < result[price_col].shift(1),
+                    -result[volume_col],
+                    0
+                )
+            ).cumsum()
+    
+    return result
+
+
+def calculate_zscore(
+    series: pd.Series, 
+    window: int = 60,
+    method: str = 'rolling',
+    min_periods: int = None
+) -> pd.Series:
+    """
+    Calculate z-scores for a time series.
     
     Args:
-        y_true: True values
-        y_pred: Predicted values
+        series: Input series
+        window: Window size for calculation
+        method: Method for calculation ('rolling', 'ewm', 'expanding')
+        min_periods: Minimum observations required, defaults to window/2
         
     Returns:
-        Dictionary with performance metrics
-    """
-    # Convert to numpy arrays
-    if isinstance(y_true, pd.Series):
-        y_true = y_true.values
-    if isinstance(y_pred, pd.Series):
-        y_pred = y_pred.values
-    
-    # Remove NaN values
-    mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
-    y_true = y_true[mask]
-    y_pred = y_pred[mask]
-    
-    # Check for empty data
-    if len(y_true) == 0 or len(y_pred) == 0:
-        logger.warning("No data for metrics calculation")
-        return {
-            'mse': np.nan,
-            'rmse': np.nan,
-            'mae': np.nan,
-            'r2': np.nan,
-            'explained_variance': np.nan
-        }
-    
-    # Mean squared error
-    mse = np.mean((y_true - y_pred) ** 2)
-    
-    # Root mean squared error
-    rmse = np.sqrt(mse)
-    
-    # Mean absolute error
-    mae = np.mean(np.abs(y_true - y_pred))
-    
-    # R-squared
-    ss_total = np.sum((y_true - np.mean(y_true)) ** 2)
-    ss_residual = np.sum((y_true - y_pred) ** 2)
-    
-    if ss_total == 0:
-        r2 = np.nan  # Can't calculate R² if all true values are the same
-    else:
-        r2 = 1 - (ss_residual / ss_total)
-    
-    # Explained variance
-    var_y_true = np.var(y_true)
-    explained_variance = 1 - (np.var(y_true - y_pred) / var_y_true) if var_y_true > 0 else np.nan
-    
-    # Compile metrics
-    metrics = {
-        'mse': mse,
-        'rmse': rmse,
-        'mae': mae,
-        'r2': r2,
-        'explained_variance': explained_variance
-    }
-    
-    return metrics
-
-
-def calculate_information_coefficient(
-    predicted: pd.Series,
-    actual: pd.Series,
-    method: str = 'rank',
-    by_group: Optional[pd.Series] = None
-) -> Union[float, pd.Series]:
-    """
-    Calculate Information Coefficient (IC) between predicted and actual values.
-    
-    Args:
-        predicted: Predicted values (e.g., alpha signals)
-        actual: Actual values (e.g., forward returns)
-        method: IC calculation method ('rank' or 'pearson')
-        by_group: Optional grouping variable for calculating IC by group
-        
-    Returns:
-        Information Coefficient value or Series of values per group
+        Series with z-scores
         
     Raises:
         ValueError: If an invalid method is specified
     """
-    # Align data
-    predicted, actual = predicted.align(actual, join='inner')
+    # Set default min_periods if not specified
+    if min_periods is None:
+        min_periods = window // 2
     
-    # Check for empty data
-    if len(predicted) == 0 or len(actual) == 0:
-        logger.warning("No aligned data for IC calculation")
-        return np.nan
-    
-    # Calculate IC by group if specified
-    if by_group is not None:
-        # Align grouping variable
-        predicted, actual, by_group = predicted.align(actual, by_group, join='inner')
-        
-        # Calculate IC for each group
-        ic_by_group = {}
-        
-        for group, group_idx in by_group.groupby(by_group).groups.items():
-            if len(group_idx) < 2:  # Need at least 2 points for correlation
-                ic_by_group[group] = np.nan
-                continue
-            
-            group_predicted = predicted.loc[group_idx]
-            group_actual = actual.loc[group_idx]
-            
-            if method == 'rank':
-                ic = stats.spearmanr(group_predicted, group_actual)[0]
-            elif method == 'pearson':
-                ic = stats.pearsonr(group_predicted, group_actual)[0]
-            else:
-                raise ValueError(f"Invalid IC method: {method}. Use 'rank' or 'pearson'")
-            
-            ic_by_group[group] = ic
-        
-        return pd.Series(ic_by_group)
-    
-    # Calculate IC for all data
-    if method == 'rank':
-        ic = stats.spearmanr(predicted, actual)[0]
-    elif method == 'pearson':
-        ic = stats.pearsonr(predicted, actual)[0]
+    # Calculate means and standard deviations
+    if method == 'rolling':
+        means = series.rolling(window=window, min_periods=min_periods).mean()
+        stds = series.rolling(window=window, min_periods=min_periods).std()
+    elif method == 'ewm':
+        means = series.ewm(span=window, min_periods=min_periods).mean()
+        stds = series.ewm(span=window, min_periods=min_periods).std()
+    elif method == 'expanding':
+        means = series.expanding(min_periods=min_periods).mean()
+        stds = series.expanding(min_periods=min_periods).std()
     else:
-        raise ValueError(f"Invalid IC method: {method}. Use 'rank' or 'pearson'")
+        raise ValueError(f"Invalid z-score method: {method}. Use 'rolling', 'ewm', or 'expanding'")
     
-    return ic
+    # Replace zero standard deviations with NaN to avoid division by zero
+    stds = stds.replace(0, np.nan)
+    
+    # Calculate z-scores
+    z_scores = (series - means) / stds
+    
+    return z_scores
 
 
-def bootstrap_statistic(
-    data: Union[pd.Series, np.ndarray],
-    statistic: Callable,
-    n_samples: int = 1000,
-    confidence_level: float = 0.95,
-    random_state: Optional[int] = None
-) -> Dict[str, float]:
+def add_lagged_features(
+    df: pd.DataFrame,
+    columns: List[str] = None,
+    lags: List[int] = [1, 5, 10],
+    drop_na: bool = False
+) -> pd.DataFrame:
     """
-    Calculate bootstrap confidence intervals for a statistic.
+    Add lagged versions of selected columns as features.
     
     Args:
-        data: Data to bootstrap
-        statistic: Function that computes the statistic
-        n_samples: Number of bootstrap samples
-        confidence_level: Confidence level for intervals
-        random_state: Random seed for reproducibility
+        df: Input DataFrame
+        columns: Columns to create lags for (defaults to all numeric columns)
+        lags: List of lag periods to create
+        drop_na: Whether to drop rows with NaN from lag creation
         
     Returns:
-        Dictionary with bootstrap results
+        DataFrame with added lag features
     """
-    # Convert to numpy array if needed
-    if isinstance(data, pd.Series):
-        data = data.dropna().values
+    # Make a copy to avoid modifying original
+    result = df.copy()
     
-    # Check for empty data
-    if len(data) == 0:
-        logger.warning("No data for bootstrap")
-        return {
-            'statistic': np.nan,
-            'lower_bound': np.nan,
-            'upper_bound': np.nan,
-            'std_error': np.nan
+    # Default to numeric columns if not specified
+    if columns is None:
+        columns = df.select_dtypes(include=np.number).columns.tolist()
+    else:
+        # Verify that specified columns exist
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # Add lag features
+    for col in columns:
+        for lag in lags:
+            result[f"{col}_lag_{lag}"] = result[col].shift(lag)
+    
+    # Drop rows with NaN if requested
+    if drop_na:
+        result = result.dropna()
+    
+    return result
+
+
+def add_difference_features(
+    df: pd.DataFrame,
+    columns: List[str] = None,
+    periods: List[int] = [1, 5, 10],
+    pct_change: bool = False,
+    drop_na: bool = False
+) -> pd.DataFrame:
+    """
+    Add period-over-period differences or percentage changes.
+    
+    Args:
+        df: Input DataFrame
+        columns: Columns to create differences for (defaults to all numeric columns)
+        periods: List of periods for difference calculation
+        pct_change: Whether to calculate percentage change instead of absolute difference
+        drop_na: Whether to drop rows with NaN from lag creation
+        
+    Returns:
+        DataFrame with added difference features
+    """
+    # Make a copy to avoid modifying original
+    result = df.copy()
+    
+    # Default to numeric columns if not specified
+    if columns is None:
+        columns = df.select_dtypes(include=np.number).columns.tolist()
+    else:
+        # Verify that specified columns exist
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # Add difference features
+    for col in columns:
+        for period in periods:
+            if pct_change:
+                result[f"{col}_pct_{period}"] = result[col].pct_change(periods=period)
+            else:
+                result[f"{col}_diff_{period}"] = result[col].diff(periods=period)
+    
+    # Drop rows with NaN if requested
+    if drop_na:
+        result = result.dropna()
+    
+    return result
+
+
+def add_rolling_features(
+    df: pd.DataFrame,
+    columns: List[str] = None,
+    windows: List[int] = [5, 10, 20],
+    functions: Dict[str, Callable] = None,
+    min_periods: Optional[int] = None,
+    drop_na: bool = False
+) -> pd.DataFrame:
+    """
+    Add rolling window aggregations as features.
+    
+    Args:
+        df: Input DataFrame
+        columns: Columns to create rolling features for (defaults to all numeric columns)
+        windows: List of window sizes
+        functions: Dictionary mapping function names to functions (defaults to mean, std, min, max)
+        min_periods: Minimum periods required in window (defaults to window // 2)
+        drop_na: Whether to drop rows with NaN from window calculations
+        
+    Returns:
+        DataFrame with added rolling features
+    """
+    # Make a copy to avoid modifying original
+    result = df.copy()
+    
+    # Default to numeric columns if not specified
+    if columns is None:
+        columns = df.select_dtypes(include=np.number).columns.tolist()
+    else:
+        # Verify that specified columns exist
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # Default functions if not specified
+    if functions is None:
+        functions = {
+            'mean': np.mean,
+            'std': np.std,
+            'min': np.min,
+            'max': np.max
         }
     
-    # Set random seed if specified
-    if random_state is not None:
-        np.random.seed(random_state)
+    # Add rolling features
+    for col in columns:
+        for window in windows:
+            # Set min_periods if not specified
+            mp = min_periods if min_periods is not None else window // 2
+            
+            # Create rolling object
+            rolling = result[col].rolling(window=window, min_periods=mp)
+            
+            # Apply each function
+            for func_name, func in functions.items():
+                result[f"{col}_{func_name}_{window}"] = rolling.apply(func)
     
-    # Calculate the statistic on original data
-    original_stat = statistic(data)
+    # Drop rows with NaN if requested
+    if drop_na:
+        result = result.dropna()
     
-    # Generate bootstrap samples
-    bootstrap_stats = []
+    return result
+
+
+#------------------------------------------------------------------------
+# Outlier Detection and Handling
+#------------------------------------------------------------------------
+
+def detect_outliers(
+    series: pd.Series,
+    method: str = 'zscore',
+    threshold: float = 3.0,
+    window: int = None
+) -> pd.Series:
+    """
+    Detect outliers in a time series.
     
-    for _ in range(n_samples):
-        # Sample with replacement
-        sample = np.random.choice(data, size=len(data), replace=True)
+    Args:
+        series: Input time series
+        method: Detection method ('zscore', 'iqr', 'mad')
+        threshold: Threshold for outlier detection
+        window: Window size for rolling detection (None for global)
         
-        # Calculate statistic on sample
-        sample_stat = statistic(sample)
-        bootstrap_stats.append(sample_stat)
+    Returns:
+        Boolean Series with True for outliers
+        
+    Raises:
+        ValueError: If an invalid method is specified
+    """
+    if method == 'zscore':
+        if window is None:
+            # Global z-score
+            mean = series.mean()
+            std = series.std()
+            z_scores = (series - mean) / std
+            return z_scores.abs() > threshold
+        else:
+            # Rolling z-score
+            z_scores = calculate_zscore(series, window=window)
+            return z_scores.abs() > threshold
     
-    # Calculate confidence interval
-    alpha = 1 - confidence_level
-    lower_percentile = alpha / 2 * 100
-    upper_percentile = (1 - alpha / 2) * 100
+    elif method == 'iqr':
+        if window is None:
+            # Global IQR
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            lower_bound = q1 - threshold * iqr
+            upper_bound = q3 + threshold * iqr
+            return (series < lower_bound) | (series > upper_bound)
+        else:
+            # Rolling IQR
+            outliers = pd.Series(False, index=series.index)
+            for i in range(window, len(series) + 1):
+                window_data = series.iloc[i - window:i]
+                q1 = window_data.quantile(0.25)
+                q3 = window_data.quantile(0.75)
+                iqr = q3 - q1
+                lower_bound = q1 - threshold * iqr
+                upper_bound = q3 + threshold * iqr
+                
+                current_idx = series.index[i - 1]
+                current_value = series.iloc[i - 1]
+                outliers.loc[current_idx] = (current_value < lower_bound) or (current_value > upper_bound)
+            
+            return outliers
     
-    lower_bound = np.percentile(bootstrap_stats, lower_percentile)
-    upper_bound = np.percentile(bootstrap_stats, upper_percentile)
+    elif method == 'mad':
+        if window is None:
+            # Global Median Absolute Deviation
+            median = series.median()
+            mad = (series - median).abs().median()
+            return (series - median).abs() > threshold * mad
+        else:
+            # Rolling MAD
+            outliers = pd.Series(False, index=series.index)
+            for i in range(window, len(series) + 1):
+                window_data = series.iloc[i - window:i]
+                median = window_data.median()
+                mad = (window_data - median).abs().median()
+                
+                current_idx = series.index[i - 1]
+                current_value = series.iloc[i - 1]
+                outliers.loc[current_idx] = (current_value - median).abs() > threshold * mad
+            
+            return outliers
     
-    # Calculate bootstrap standard error
-    std_error = np.std(bootstrap_stats)
+    else:
+        raise ValueError(f"Invalid outlier detection method: {method}. Use 'zscore', 'iqr', or 'mad'")
+
+
+def handle_outliers(
+    df: pd.DataFrame,
+    columns: List[str] = None,
+    method: str = 'zscore',
+    threshold: float = 3.0,
+    treatment: str = 'winsorize',
+    window: int = None
+) -> pd.DataFrame:
+    """
+    Detect and handle outliers in specified columns.
     
-    # Compile results
-    results = {
-        'statistic': original_stat,
-        'lower_bound': lower_bound,
-        'upper_bound': upper_bound,
-        'std_error': std_error,
-        'n_samples': n_samples,
-        'confidence_level': confidence_level
-    }
+    Args:
+        df: Input DataFrame
+        columns: Columns to check for outliers (defaults to all numeric columns)
+        method: Detection method ('zscore', 'iqr', 'mad')
+        threshold: Threshold for outlier detection
+        treatment: Treatment method ('winsorize', 'mean', 'median', 'drop', 'none')
+        window: Window size for rolling detection (None for global)
+        
+    Returns:
+        DataFrame with outliers handled
+        
+    Raises:
+        ValueError: If an invalid treatment method is specified
+    """
+    # Make a copy to avoid modifying original
+    result = df.copy()
     
-    return results
+    # Default to numeric columns if not specified
+    if columns is None:
+        columns = df.select_dtypes(include=np.number).columns.tolist()
+    else:
+        # Verify that specified columns exist
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # Process each column
+    outlier_counts = {}
+    for col in columns:
+        # Skip columns with all NaN
+        if result[col].isna().all():
+            logger.warning(f"Skipping column '{col}': all values are NaN")
+            continue
+        
+        # Detect outliers
+        is_outlier = detect_outliers(
+            result[col].dropna(),
+            method=method,
+            threshold=threshold,
+            window=window
+        )
+        
+        # Count outliers
+        outlier_count = is_outlier.sum()
+        outlier_counts[col] = outlier_count
+        
+        if outlier_count == 0:
+            continue
+        
+        # Get outlier indices
+        outlier_indices = is_outlier[is_outlier].index
+        
+        # Handle outliers according to treatment method
+        if treatment == 'winsorize':
+            if window is None:
+                # Global winsorization
+                lower_bound = result[col].quantile(0.01)
+                upper_bound = result[col].quantile(0.99)
+                result.loc[result[col] < lower_bound, col] = lower_bound
+                result.loc[result[col] > upper_bound, col] = upper_bound
+            else:
+                for idx in outlier_indices:
+                    # Find the window containing this index
+                    pos = result.index.get_loc(idx)
+                    window_start = max(0, pos - window + 1)
+                    window_end = pos + 1
+                    
+                    # Get the data in this window
+                    window_data = result.iloc[window_start:window_end][col]
+                    
+                    # Calculate winsorization bounds
+                    lower_bound = window_data.quantile(0.01)
+                    upper_bound = window_data.quantile(0.99)
+                    
+                    # Apply winsorization
+                    if result.loc[idx, col] < lower_bound:
+                        result.loc[idx, col] = lower_bound
+                    elif result.loc[idx, col] > upper_bound:
+                        result.loc[idx, col] = upper_bound
+        
+        elif treatment == 'mean':
+            if window is None:
+                # Replace with global mean
+                mean_value = result[col].mean()
+                result.loc[outlier_indices, col] = mean_value
+            else:
+                for idx in outlier_indices:
+                    # Find the window containing this index
+                    pos = result.index.get_loc(idx)
+                    window_start = max(0, pos - window + 1)
+                    window_end = pos + 1
+                    
+                    # Calculate mean excluding the outlier
+                    window_values = result.iloc[window_start:window_end][col]
+                    window_values = window_values[window_values.index != idx]
+                    mean_value = window_values.mean()
+                    
+                    # Replace outlier with mean
+                    result.loc[idx, col] = mean_value
+        
+        elif treatment == 'median':
+            if window is None:
+                # Replace with global median
+                median_value = result[col].median()
+                result.loc[outlier_indices, col] = median_value
+            else:
+                for idx in outlier_indices:
+                    # Find the window containing this index
+                    pos = result.index.get_loc(idx)
+                    window_start = max(0, pos - window + 1)
+                    window_end = pos + 1
+                    
+                    # Calculate median excluding the outlier
+                    window_values = result.iloc[window_start:window_end][col]
+                    window_values = window_values[window_values.index != idx]
+                    median_value = window_values.median()
+                    
+                    # Replace outlier with median
+                    result.loc[idx, col] = median_value
+        
+        elif treatment == 'drop':
+            # Drop rows with outliers
+            result = result.drop(outlier_indices)
+        
+        elif treatment == 'none':
+            # Just detect, don't treat
+            continue
+        
+        else:
+            raise ValueError(
+                f"Invalid outlier treatment method: {treatment}. Use "
+                f"'winsorize', 'mean', 'median', 'drop', or 'none'."
+            )
+    
+    # Log outlier counts
+    if any(count > 0 for count in outlier_counts.values()):
+        outlier_info = ", ".join([f"{col}: {count}" for col, count in outlier_counts.items() if count > 0])
+        logger.info(f"Outliers detected and {treatment}d - {outlier_info}")
+    
+    return result
+
+
+#------------------------------------------------------------------------
+# Normalization and Scaling
+#------------------------------------------------------------------------
+
+def normalize_data(
+    df: pd.DataFrame,
+    columns: List[str] = None,
+    method: str = 'standard',
+    feature_range: Tuple[float, float] = (0, 1),
+    window: int = None,
+    output_scaler: bool = False
+) -> Union[pd.DataFrame, Tuple[pd.DataFrame, Any]]:
+    """
+    Normalize or scale data.
+    
+    Args:
+        df: Input DataFrame
+        columns: Columns to normalize (defaults to all numeric columns)
+        method: Scaling method ('standard', 'minmax', 'robust', 'log', 'box-cox')
+        feature_range: Range for MinMaxScaler
+        window: Window size for rolling normalization (None for global)
+        output_scaler: Whether to return the fitted scaler
+        
+    Returns:
+        Normalized DataFrame or tuple of (DataFrame, scaler)
+        
+    Raises:
+        ValueError: If an invalid method is specified
+    """
+    # Make a copy to avoid modifying original
+    result = df.copy()
+    
+    # Default to numeric columns if not specified
+    if columns is None:
+        columns = df.select_dtypes(include=np.number).columns.tolist()
+    else:
+        # Verify that specified columns exist
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # For global scaling
+    if window is None:
+        # Create the appropriate scaler
+        if method == 'standard':
+            scaler = StandardScaler()
+        elif method == 'minmax':
+            scaler = MinMaxScaler(feature_range=feature_range)
+        elif method == 'robust':
+            scaler = RobustScaler()
+        elif method in ['log', 'box-cox']:
+            # For these methods we don't use sklearn scalers
+            scaler = None
+        else:
+            raise ValueError(
+                f"Invalid normalization method: {method}. Use "
+                f"'standard', 'minmax', 'robust', 'log', or 'box-cox'."
+            )
+        
+        # Apply scaling
+        if method in ['standard', 'minmax', 'robust']:
+            # Extract columns to scale
+            data_to_scale = result[columns].values
+            
+            # Fit and transform
+            scaled_data = scaler.fit_transform(data_to_scale)
+            
+            # Update DataFrame
+            result[columns] = scaled_data
+            
+        elif method == 'log':
+            # Check for non-positive values
+            for col in columns:
+                if (result[col] <= 0).any():
+                    min_val = result[col].min()
+                    if min_val <= 0:
+                        # Shift to make all values positive
+                        shift = abs(min_val) + 1e-6
+                        logger.warning(
+                            f"Column '{col}' contains non-positive values. "
+                            f"Shifting by {shift} for log transformation."
+                        )
+                        result[col] = result[col] + shift
+                
+                # Apply log transformation
+                result[col] = np.log(result[col])
+            
+        elif method == 'box-cox':
+            from scipy import stats
+            
+            # Apply Box-Cox transformation
+            for col in columns:
+                # Check for non-positive values
+                if (result[col] <= 0).any():
+                    min_val = result[col].min()
+                    if min_val <= 0:
+                        # Shift to make all values positive
+                        shift = abs(min_val) + 1e-6
+                        logger.warning(
+                            f"Column '{col}' contains non-positive values. "
+                            f"Shifting by {shift} for Box-Cox transformation."
+                        )
+                        result[col] = result[col] + shift
+                
+                # Apply Box-Cox transformation
+                transformed_data, lambda_param = stats.boxcox(result[col].values)
+                result[col] = transformed_data
+    
+    # For rolling window scaling
+    else:
+        # Only implemented for basic methods
+        if method not in ['standard', 'minmax']:
+            raise ValueError(
+                f"Rolling normalization only supports 'standard' and 'minmax' methods, got '{method}'"
+            )
+        
+        for col in columns:
+            # For each point, normalize based on the preceding window
+            for i in range(window, len(result) + 1):
+                window_data = result.iloc[i - window:i][col].values.reshape(-1, 1)
+                
+                if method == 'standard':
+                    scaler = StandardScaler().fit(window_data)
+                else:  # minmax
+                    scaler = MinMaxScaler(feature_range=feature_range).fit(window_data)
+                
+                # Transform only the current point
+                current_idx = result.index[i - 1]
+                current_value = result.loc[current_idx, col]
+                result.loc[current_idx, col] = scaler.transform([[current_value]])[0][0]
+        
+        # No scaler to return for rolling window
+        scaler = None
+    
+    if output_scaler:
+        return result, scaler
+    else:
+        return result
+
+
+#------------------------------------------------------------------------
+# Time Series Cross-Validation
+#------------------------------------------------------------------------
+
+def time_series_split(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    train_pct: float = 0.8,
+    valid_pct: float = 0.1,
+    gap: int = 0,
+    min_train_size: int = None
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    """
+    Create time series train/validation/test splits.
+    
+    Args:
+        df: Input DataFrame with datetime index
+        n_splits: Number of splits to create
+        train_pct: Percentage of data for training in each split
+        valid_pct: Percentage of data for validation in each split
+        gap: Number of samples to skip between train and validation/test
+        min_train_size: Minimum size of training set
+        
+    Returns:
+        List of (train, validation, test) DataFrame tuples
+        
+    Raises:
+        TypeError: If DataFrame doesn't have a datetime index
+        ValueError: If invalid split percentages are provided
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index for time series split")
+    
+    # Validate percentages
+    if train_pct + valid_pct >= 1.0:
+        raise ValueError(
+            f"Sum of train_pct ({train_pct}) and valid_pct ({valid_pct}) "
+            f"must be less than 1.0 to allow for a test set"
+        )
+    
+    if train_pct <= 0 or valid_pct <= 0 or (1 - train_pct - valid_pct) <= 0:
+        raise ValueError("All split percentages must be positive")
+    
+    # Calculate default min_train_size
+    if min_train_size is None:
+        min_train_size = int(len(df) * train_pct / n_splits)
+    
+    # Create splits
+    splits = []
+    
+    # Size of each increment
+    incr_size = (len(df) - min_train_size) // (n_splits - 1) if n_splits > 1 else 0
+    
+    for i in range(n_splits):
+        # Calculate split indices
+        train_end = min_train_size + i * incr_size
+        valid_start = train_end + gap
+        valid_end = valid_start + int(len(df) * valid_pct)
+        test_start = valid_end + gap
+        test_end = min(test_start + int(len(df) * (1 - train_pct - valid_pct)), len(df))
+        
+        # Skip if not enough data for all splits
+        if test_end <= test_start or valid_end <= valid_start:
+            logger.warning(f"Skipping split {i+1}/{n_splits}: insufficient data")
+            continue
+        
+        # Create splits
+        train = df.iloc[:train_end]
+        valid = df.iloc[valid_start:valid_end]
+        test = df.iloc[test_start:test_end]
+        
+        splits.append((train, valid, test))
+    
+    logger.info(f"Created {len(splits)} time series splits")
+    
+    return splits
+
+
+def expanding_window_split(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    test_size: float = 0.2,
+    valid_size: float = 0.2,
+    gap: int = 0,
+    min_train_size: int = None
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    """
+    Create expanding window time series splits (train set grows with each split).
+    
+    Args:
+        df: Input DataFrame with datetime index
+        n_splits: Number of splits to create
+        test_size: Proportion of data for testing
+        valid_size: Proportion of data for validation
+        gap: Number of samples to skip between train and validation/test
+        min_train_size: Minimum size of training set
+        
+    Returns:
+        List of (train, validation, test) DataFrame tuples
+        
+    Raises:
+        TypeError: If DataFrame doesn't have a datetime index
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index for expanding window split")
+    
+    # Set default min_train_size
+    if min_train_size is None:
+        min_train_size = int(len(df) * 0.3)
+    
+    # Total size of validation and test portions
+    eval_size = test_size + valid_size
+    
+    # Calculate size of each step
+    full_size = len(df)
+    eval_portion = full_size * eval_size  # Size of combined validation and test data
+    step_size = (full_size - eval_portion - min_train_size) / (n_splits - 1) if n_splits > 1 else 0
+    
+    # Create splits
+    splits = []
+    
+    for i in range(n_splits):
+        # Calculate split indices
+        train_end = min_train_size + int(i * step_size)
+        valid_start = train_end + gap
+        valid_end = valid_start + int(valid_size * full_size)
+        test_start = valid_end + gap
+        test_end = min(test_start + int(test_size * full_size), full_size)
+        
+        # Skip if not enough data for all splits
+        if test_end <= test_start or valid_end <= valid_start:
+            logger.warning(f"Skipping split {i+1}/{n_splits}: insufficient data")
+            continue
+        
+        # Create splits
+        train = df.iloc[:train_end]
+        valid = df.iloc[valid_start:valid_end]
+        test = df.iloc[test_start:test_end]
+        
+        splits.append((train, valid, test))
+    
+    logger.info(f"Created {len(splits)} expanding window splits")
+    
+    return splits
+
+
+def walk_forward_split(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    train_size: int = None,
+    test_size: int = None,
+    valid_size: int = None,
+    step_size: int = None,
+    gap: int = 0
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    """
+    Create walk-forward time series splits with sliding windows.
+    
+    Args:
+        df: Input DataFrame with datetime index
+        n_splits: Number of splits to create
+        train_size: Number of samples in training set (default is 70% of data)
+        test_size: Number of samples in test set (default is 15% of data)
+        valid_size: Number of samples in validation set (default is 15% of data)
+        step_size: Number of samples to slide window forward (default is test_size)
+        gap: Number of samples to skip between train/validation/test
+        
+    Returns:
+        List of (train, validation, test) DataFrame tuples
+        
+    Raises:
+        TypeError: If DataFrame doesn't have a datetime index
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index for walk forward split")
+    
+    # Set defaults
+    if train_size is None:
+        train_size = int(len(df) * 0.7)
+    
+    if test_size is None:
+        test_size = int(len(df) * 0.15)
+    
+    if valid_size is None:
+        valid_size = int(len(df) * 0.15)
+    
+    if step_size is None:
+        step_size = test_size
+    
+    # Ensure there's enough data
+    if train_size + valid_size + test_size + 2 * gap > len(df):
+        raise ValueError(
+            f"Insufficient data for specified split sizes: "
+            f"train_size={train_size}, valid_size={valid_size}, test_size={test_size}, gap={gap}"
+        )
+    
+    # Create splits
+    splits = []
+    
+    for i in range(n_splits):
+        # Calculate start/end indices
+        train_start = i * step_size
+        train_end = train_start + train_size
+        
+        # If we've reached the end of the data, stop
+        if train_end + valid_size + test_size + 2 * gap > len(df):
+            break
+        
+        valid_start = train_end + gap
+        valid_end = valid_start + valid_size
+        test_start = valid_end + gap
+        test_end = test_start + test_size
+        
+        # Create split
+        train = df.iloc[train_start:train_end]
+        valid = df.iloc[valid_start:valid_end]
+        test = df.iloc[test_start:test_end]
+        
+        splits.append((train, valid, test))
+    
+    logger.info(f"Created {len(splits)} walk-forward splits")
+    
+    return splits
