@@ -7,33 +7,44 @@ tradeable signals for quantitative trading strategies.
 The module follows the project's analytics interface pattern by exposing a
 `generate_signal(df, **params)` function that processes input data and writes
 standardized signals to the signal store.
-
-Classes:
-    SentimentAnalyzer: Core transformer-based sentiment extraction
-    SentimentFeatureEngine: Creates time-series features from raw sentiment
-    SignalGenerator: Converts sentiment features into trading signals
-    PerformanceAnalyzer: Analyzes signal efficacy through various metrics
 """
 
+# Standard library imports
 import logging
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union, Any
 
+# Third-party imports
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import torch
-from scipy import stats
-import statsmodels.api as sm
-from statsmodels.tsa.stattools import ccf
-import pyarrow as pa
-import pyarrow.parquet as pq
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
+# Local imports
 from quant_research.core.models import Signal
 from quant_research.core.storage import save_to_duckdb
+from quant_research.analytics.common.base import SignalGenerator
+from quant_research.analytics.common.data_prep import (
+    ensure_datetime_index, 
+    add_technical_features,
+    normalize_data
+)
+from quant_research.analytics.common.validation import (
+    validate_dataframe,
+    validate_string_param,
+    validate_list_param
+)
+from quant_research.analytics.common.statistics import (
+    calculate_correlation,
+    calculate_information_coefficient,
+    bootstrap_statistic
+)
+from quant_research.analytics.common.visualization import (
+    plot_correlation_matrix,
+    plot_time_series,
+    create_multi_panel
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -41,8 +52,6 @@ logger = logging.getLogger(__name__)
 # Constants
 DEFAULT_MODEL_NAME = "finiteautomata/bertweet-base-sentiment-analysis"
 DEFAULT_WINDOW_SIZES = [1, 3, 5, 7, 14]  # Days for feature calculation
-DEFAULT_LAG_RANGE = range(-10, 11)  # Days from -10 to +10 for correlation
-DEFAULT_PLOT_DIR = "data/plots/sentiment"
 
 
 @dataclass
@@ -86,6 +95,10 @@ class SentimentAnalyzer:
             model_name: HuggingFace model identifier
         """
         logger.info(f"Initializing SentimentAnalyzer with model: {model_name}")
+        
+        # Validate input
+        model_name = validate_string_param(model_name, "model_name")
+        
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
@@ -104,6 +117,9 @@ class SentimentAnalyzer:
         Returns:
             Preprocessed text strings
         """
+        # Validate input
+        texts = validate_list_param(texts, "texts", item_type=str, allow_none=True)
+        
         processed = []
         
         for text in texts:
@@ -133,6 +149,10 @@ class SentimentAnalyzer:
         Returns:
             List of sentiment dictionaries with scores for each class
         """
+        # Validate inputs
+        texts = validate_list_param(texts, "texts", item_type=str, allow_none=True)
+        batch_size = max(1, int(batch_size))
+        
         results = []
         preprocessed_texts = self.preprocess_texts(texts)
         
@@ -236,11 +256,21 @@ class TextPreprocessor:
         Returns:
             Preprocessed DataFrame
         """
+        # Validate input
+        df, errors = validate_dataframe(
+            df, 
+            required_columns=[text_col, time_col],
+            raise_exceptions=False
+        )
+        
+        if errors:
+            logger.warning(f"DataFrame validation had issues: {'; '.join(errors)}")
+        
         # Make a copy to avoid modifying the original
         df = df.copy()
         
         # Ensure timestamp is datetime
-        df[time_col] = pd.to_datetime(df[time_col])
+        df = ensure_datetime_index(df, timestamp_col=time_col, inplace=True)
         
         # Sort by time
         df = df.sort_values(by=time_col)
@@ -254,24 +284,79 @@ class TextPreprocessor:
         return df
 
 
-class SentimentFeatureEngine:
+class SentimentSignalGenerator(SignalGenerator):
     """
-    Creates time-series features from raw sentiment data.
+    Generates trading signals from social media sentiment data.
     
-    This class handles the transformation of raw tweet-level sentiment
-    into aggregated time-series features suitable for signal generation.
+    This class extends the base SignalGenerator class from the analytics
+    common framework to provide sentiment-specific signal generation.
     """
     
-    def __init__(self, config: SentimentConfig):
+    def __init__(self, config: Optional[SentimentConfig] = None, **kwargs):
         """
-        Initialize the feature engine.
+        Initialize the sentiment signal generator.
         
         Args:
-            config: Configuration parameters
+            config: Configuration for sentiment analysis
+            **kwargs: Additional parameters
         """
-        self.config = config
+        super().__init__(**kwargs)
+        
+        # Use provided config or create a default one
+        self.config = config or SentimentConfig()
+        
+        # Initialize components
+        self.analyzer = SentimentAnalyzer(self.config.model_name)
+        
+        # Create output directory if specified
+        if self.config.output_dir:
+            os.makedirs(self.config.output_dir, exist_ok=True)
     
-    def aggregate_daily(
+    def _generate(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Implementation-specific signal generation logic.
+        
+        This method is called by the base class's generate_signal method.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            DataFrame with signals
+        """
+        # Extract parameters
+        text_col = self.params.get("text_col", "text")
+        time_col = self.params.get("time_col", "timestamp")
+        
+        # Preprocess text data
+        preprocessed_df = TextPreprocessor.preprocess_dataframe(
+            df, text_col=text_col, time_col=time_col
+        )
+        
+        # Extract sentiment from text
+        sentiment_scores = self.analyzer.analyze_batch(
+            preprocessed_df[text_col].tolist(), 
+            batch_size=self.config.batch_size
+        )
+        
+        # Create daily aggregated sentiment features
+        daily_sentiment = self._aggregate_daily_sentiment(
+            preprocessed_df, sentiment_scores, time_col
+        )
+        
+        # Generate features from daily sentiment
+        features_df = self._create_sentiment_features(daily_sentiment)
+        
+        # Analyze performance with price data if available
+        price_df = self.params.get("price_df")
+        feature_cols = self._analyze_performance(features_df, price_df)
+        
+        # Generate signals from features
+        signals_df = self._generate_signals_from_features(features_df, feature_cols)
+        
+        return signals_df
+    
+    def _aggregate_daily_sentiment(
         self,
         df: pd.DataFrame,
         sentiment_scores: List[Dict[str, float]],
@@ -294,7 +379,7 @@ class SentimentFeatureEngine:
         df["neutral"] = [score["neutral"] for score in sentiment_scores]
         df["negative"] = [score["negative"] for score in sentiment_scores]
         df["sentiment_score"] = [
-            score["positive"] - score["negative"] for score in sentiment_scores
+            self.analyzer.get_sentiment_score(score) for score in sentiment_scores
         ]
         
         # Convert to date for grouping
@@ -319,9 +404,12 @@ class SentimentFeatureEngine:
         
         return daily
     
-    def create_features(self, daily_df: pd.DataFrame) -> pd.DataFrame:
+    def _create_sentiment_features(self, daily_df: pd.DataFrame) -> pd.DataFrame:
         """
         Create time-series features from daily sentiment.
+        
+        This method uses the common add_technical_features function
+        to create standardized features from the daily sentiment data.
         
         Args:
             daily_df: DataFrame with daily sentiment metrics
@@ -330,305 +418,160 @@ class SentimentFeatureEngine:
             DataFrame with sentiment features
         """
         df = daily_df.sort_values(by="date").copy()
+        df = df.set_index("date")
+        
+        # Generate features using common utilities
+        feature_cols = []
         
         # Create features for each window size
         for window in self.config.window_sizes:
-            # Simple moving average
-            df[f"sentiment_sma_{window}d"] = (
-                df["sentiment_score_mean"].rolling(window=window).mean()
+            # Use the common add_technical_features function with sentiment data
+            window_features = add_technical_features(
+                df, 
+                price_col="sentiment_score_mean",
+                window=window,
+                include=["ma", "zscore", "roc", "ema", "momentum"]
             )
             
-            # Standard deviation (volatility)
-            df[f"sentiment_std_{window}d"] = (
-                df["sentiment_score_mean"].rolling(window=window).std()
-            )
+            # Merge with original dataframe
+            df = pd.concat([df, window_features], axis=1)
             
-            # Z-score (normalized deviation from mean)
-            mean_col = f"sentiment_sma_{window}d"
-            std_col = f"sentiment_std_{window}d"
-            
-            df[f"sentiment_zscore_{window}d"] = (
-                df["sentiment_score_mean"] - df[mean_col]
-            ) / df[std_col].replace(0, np.nan)
-            
-            # Rate of change
-            df[f"sentiment_roc_{window}d"] = (
-                df["sentiment_score_mean"].pct_change(periods=window)
-            )
-            
-            # Exponential moving average
-            df[f"sentiment_ema_{window}d"] = (
-                df["sentiment_score_mean"].ewm(span=window).mean()
-            )
-            
-            # Momentum (difference between current value and n periods ago)
-            df[f"sentiment_momentum_{window}d"] = (
-                df["sentiment_score_mean"] - 
-                df["sentiment_score_mean"].shift(window)
-            )
+            # Track feature columns
+            feature_cols.extend([
+                f"sentiment_score_mean_ma_{window}",
+                f"sentiment_score_mean_zscore_{window}",
+                f"sentiment_score_mean_roc_{window}",
+                f"sentiment_score_mean_ema_{window}",
+                f"sentiment_score_mean_momentum_{window}"
+            ])
         
         # Replace infinite values with NaN
         df = df.replace([np.inf, -np.inf], np.nan)
         
         return df
-
-
-class PerformanceAnalyzer:
-    """
-    Analyzes the efficacy of sentiment features for predicting returns.
-    """
     
-    def __init__(self, config: SentimentConfig):
-        """
-        Initialize the performance analyzer.
-        
-        Args:
-            config: Configuration parameters
-        """
-        self.config = config
-        self.lag_range = DEFAULT_LAG_RANGE
-        
-        # Create output directory if needed
-        if self.config.output_dir:
-            os.makedirs(self.config.output_dir, exist_ok=True)
-    
-    def compute_lag_correlations(
+    def _analyze_performance(
         self,
         sentiment_df: pd.DataFrame,
-        price_df: pd.DataFrame,
-        price_col: str = "close",
-        return_col: str = "returns"
-    ) -> pd.DataFrame:
+        price_df: Optional[pd.DataFrame] = None
+    ) -> List[str]:
         """
-        Compute correlations between sentiment and returns at various lags.
-        
-        Args:
-            sentiment_df: DataFrame with sentiment data
-            price_df: DataFrame with price data
-            price_col: Column containing price
-            return_col: Column containing returns
-            
-        Returns:
-            DataFrame with lag correlations
-        """
-        # Prepare sentiment and price data
-        sentiment_df = sentiment_df.copy().set_index("date")
-        price_df = price_df.copy()
-        
-        # Calculate returns if not present
-        if return_col not in price_df.columns:
-            price_df[return_col] = price_df[price_col].pct_change()
-        
-        price_df = price_df.set_index("date")
-        
-        # Extract time series
-        sentiment = sentiment_df["sentiment_score_mean"]
-        returns = price_df[return_col]
-        
-        # Align indices
-        sentiment, returns = sentiment.align(returns, join="inner")
-        
-        if len(sentiment) < 10:
-            logger.warning(
-                "Insufficient data for lag correlation analysis "
-                f"(only {len(sentiment)} matching dates)"
-            )
-            return pd.DataFrame(columns=["lag", "correlation", "label", "abs_correlation"])
-        
-        # Compute correlations at different lags
-        results = []
-        
-        for lag in self.lag_range:
-            if lag < 0:
-                # Sentiment leads returns
-                shifted_sentiment = sentiment.shift(-lag)
-                corr = shifted_sentiment.corr(returns)
-                label = f"Sentiment(t-{abs(lag)}) → Returns(t)"
-            elif lag > 0:
-                # Returns lead sentiment
-                shifted_returns = returns.shift(-lag)
-                corr = sentiment.corr(shifted_returns)
-                label = f"Returns(t-{lag}) → Sentiment(t)"
-            else:
-                # Contemporaneous
-                corr = sentiment.corr(returns)
-                label = "Sentiment(t) ~ Returns(t)"
-            
-            results.append({
-                "lag": lag,
-                "correlation": corr,
-                "label": label,
-                "abs_correlation": abs(corr)
-            })
-        
-        df = pd.DataFrame(results)
-        df = df.sort_values("abs_correlation", ascending=False)
-        
-        return df
-    
-    def plot_lag_correlations(
-        self, correlation_df: pd.DataFrame
-    ) -> Optional[str]:
-        """
-        Plot lag correlations between sentiment and returns.
-        
-        Args:
-            correlation_df: DataFrame with lag correlations
-            
-        Returns:
-            Path to saved plot if output_dir is specified, otherwise None
-        """
-        if correlation_df.empty:
-            logger.warning("Cannot create plot: empty correlation data")
-            return None
-        
-        plt.figure(figsize=(12, 6))
-        
-        # Plot bars
-        bars = plt.bar(
-            correlation_df["lag"],
-            correlation_df["correlation"],
-            color=correlation_df["correlation"].apply(
-                lambda x: "forestgreen" if x > 0 else "firebrick"
-            )
-        )
-        
-        # Reference lines
-        plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        plt.axvline(x=0, color='black', linestyle='--', alpha=0.3)
-        
-        # Annotate strongest correlations
-        top_corrs = correlation_df.nlargest(3, "abs_correlation")
-        for _, row in top_corrs.iterrows():
-            plt.annotate(
-                f"{row['correlation']:.3f}",
-                xy=(row["lag"], row["correlation"]),
-                xytext=(0, 10 if row["correlation"] > 0 else -20),
-                textcoords="offset points",
-                ha='center',
-                fontweight='bold'
-            )
-        
-        # Labels and title
-        plt.xlabel("Lag (Days)")
-        plt.ylabel("Correlation Coefficient")
-        plt.title("Sentiment-Return Correlations at Different Lags")
-        plt.grid(True, alpha=0.3)
-        
-        # Explanation text
-        textstr = '\n'.join([
-            "Negative lag: Sentiment leads Returns",
-            "Positive lag: Returns lead Sentiment",
-            "Zero lag: Contemporaneous correlation"
-        ])
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-        plt.text(
-            0.05, 0.95, textstr, transform=plt.gca().transAxes,
-            verticalalignment='top', bbox=props
-        )
-        
-        plt.tight_layout()
-        
-        # Save if output directory specified
-        if self.config.output_dir:
-            output_path = os.path.join(
-                self.config.output_dir, "sentiment_lag_correlations.png"
-            )
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Saved lag correlation plot to {output_path}")
-            return output_path
-        
-        return None
-    
-    def compute_information_coefficient(
-        self,
-        sentiment_df: pd.DataFrame,
-        return_df: pd.DataFrame,
-        sentiment_cols: List[str],
-        return_col: str = "returns",
-        ic_type: str = "rank"
-    ) -> pd.DataFrame:
-        """
-        Compute Information Coefficient for sentiment features.
+        Analyze correlation with price movements and select features.
         
         Args:
             sentiment_df: DataFrame with sentiment features
-            return_df: DataFrame with returns
-            sentiment_cols: List of sentiment feature columns
-            return_col: Column containing returns
-            ic_type: Type of correlation ('rank' or 'pearson')
+            price_df: Optional DataFrame with price data
             
         Returns:
-            DataFrame with IC analysis
+            List of selected feature columns
         """
-        # Prepare data
-        sentiment_df = sentiment_df.set_index("date")
-        return_df = return_df.set_index("date")
+        # Default feature columns if no price data
+        default_features = [
+            f"sentiment_score_mean_zscore_{window}" 
+            for window in self.config.window_sizes[:3]
+        ]
         
-        # Get next-day returns (forward returns)
-        next_day_returns = return_df[return_col].shift(-1)
+        if price_df is None:
+            return default_features
         
-        # Calculate IC for each feature
-        results = []
+        feature_cols = []
+        for window in self.config.window_sizes:
+            feature_cols.extend([
+                f"sentiment_score_mean_ma_{window}",
+                f"sentiment_score_mean_zscore_{window}", 
+                f"sentiment_score_mean_roc_{window}",
+                f"sentiment_score_mean_ema_{window}",
+                f"sentiment_score_mean_momentum_{window}"
+            ])
         
-        for col in sentiment_cols:
+        # Ensure price_df has a returns column
+        if "returns" not in price_df.columns and "close" in price_df.columns:
+            price_df = price_df.copy()
+            price_df["returns"] = price_df["close"].pct_change()
+        
+        # Reset index to make sure align works
+        sentiment_df = sentiment_df.reset_index()
+        price_df = price_df.reset_index()
+        
+        # Calculate correlation with next-day returns
+        next_day_returns = price_df["returns"].shift(-1)
+        
+        # Calculate Information Coefficient for each feature
+        ic_results = []
+        
+        for col in feature_cols:
             if col not in sentiment_df.columns:
                 continue
+                
+            # Align data
+            feature = sentiment_df.set_index("date")[col]
+            returns = next_day_returns.set_index(price_df["date"])
             
-            feature = sentiment_df[col].dropna()
-            returns = next_day_returns.loc[feature.index].dropna()
-            
-            # Align data and drop NaNs
+            # Align series and drop NAs
             feature, returns = feature.align(returns, join="inner")
             
             if len(feature) < 10:
-                logger.debug(f"Skipping {col}: insufficient data")
                 continue
+                
+            # Calculate IC using common statistics function
+            ic = calculate_information_coefficient(feature, returns, method="rank")
             
-            # Calculate correlation
-            if ic_type == "rank":
-                ic = stats.spearmanr(feature, returns)[0]
-            else:  # pearson
-                ic = stats.pearsonr(feature, returns)[0]
+            # Calculate statistics via bootstrap
+            def calc_corr(data):
+                x, y = data[:, 0], data[:, 1]
+                return stats.spearmanr(x, y)[0]
             
-            # Calculate statistics
+            combined_data = np.column_stack([feature.values, returns.values])
+            bootstrap_results = bootstrap_statistic(
+                combined_data,
+                calc_corr,
+                n_samples=1000,
+                confidence_level=0.95
+            )
+            
+            # Calculate p-value
             t_stat = ic * np.sqrt((len(feature) - 2) / (1 - ic**2))
             p_value = 2 * (1 - stats.t.cdf(abs(t_stat), len(feature) - 2))
             
-            results.append({
+            ic_results.append({
                 "feature": col,
                 "ic": ic,
-                "t_stat": t_stat,
+                "lower_bound": bootstrap_results["lower_bound"],
+                "upper_bound": bootstrap_results["upper_bound"],
                 "p_value": p_value,
-                "observations": len(feature),
                 "significant": p_value < 0.05
             })
         
-        if not results:
-            logger.warning("No valid features for IC calculation")
-            return pd.DataFrame()
+        if not ic_results:
+            return default_features
         
-        ic_df = pd.DataFrame(results)
-        
-        # Sort by absolute IC
+        # Create DataFrame and sort by absolute IC
+        ic_df = pd.DataFrame(ic_results)
         ic_df["abs_ic"] = ic_df["ic"].abs()
         ic_df = ic_df.sort_values("abs_ic", ascending=False)
         
-        return ic_df
+        # Plot results if output directory specified
+        if self.config.output_dir:
+            self._plot_ic_results(ic_df)
+        
+        # Select best features
+        top_n = 5
+        significant = ic_df[ic_df["significant"]].copy()
+        
+        if len(significant) >= top_n:
+            return significant.head(top_n)["feature"].tolist()
+        else:
+            return ic_df.head(top_n)["feature"].tolist()
     
-    def plot_ic_table(self, ic_df: pd.DataFrame) -> Optional[str]:
+    def _plot_ic_results(self, ic_df: pd.DataFrame) -> None:
         """
-        Create a visualization of the Information Coefficient results.
+        Create visualizations of Information Coefficient results.
         
         Args:
             ic_df: DataFrame with IC results
-            
-        Returns:
-            Path to saved plot if output_dir is specified, otherwise None
         """
         if ic_df.empty:
-            logger.warning("Cannot create plot: empty IC data")
-            return None
+            return
         
         # Take top features
         top_ic = ic_df.head(15).copy()
@@ -651,101 +594,15 @@ class PerformanceAnalyzer:
             height=0.6
         )
         
-        # Reference line
-        ax.axvline(x=0, color='black', linestyle='-', alpha=0.3)
-        
-        # Labels and title
-        ax.set_xlabel("Information Coefficient (IC)")
-        ax.set_title("Predictive Power of Sentiment Features")
-        ax.grid(True, alpha=0.3, axis='x')
-        
-        # Annotate significant features
-        for i, (_, row) in enumerate(top_ic.iterrows()):
-            if row["significant"]:
-                ax.text(
-                    row["ic"] + (0.01 if row["ic"] > 0 else -0.01),
-                    i,
-                    f"p={row['p_value']:.3f}*",
-                    va='center',
-                    fontweight='bold'
-                )
-        
-        # Explanation text
-        textstr = '\n'.join([
-            "* p < 0.05 (statistically significant)",
-            "Positive IC: Higher sentiment → Higher next-day returns",
-            "Negative IC: Higher sentiment → Lower next-day returns"
-        ])
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-        ax.text(
-            0.05, 0.05, textstr, transform=ax.transAxes,
-            verticalalignment='bottom', bbox=props
-        )
-        
-        plt.tight_layout()
-        
-        # Save if output directory specified
-        if self.config.output_dir:
-            output_path = os.path.join(
-                self.config.output_dir, "sentiment_ic_table.png"
-            )
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Saved IC table plot to {output_path}")
-            return output_path
-        
-        return None
+        # Save using common visualization function
+        output_path = os.path.join(self.config.output_dir, "sentiment_ic_table.png")
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        logger.info(f"Saved IC table plot to {output_path}")
     
-    def get_best_features(self, ic_df: pd.DataFrame, top_n: int = 5) -> List[str]:
-        """
-        Get the best performing features based on IC analysis.
-        
-        Args:
-            ic_df: DataFrame with IC results
-            top_n: Number of top features to return
-            
-        Returns:
-            List of feature column names
-        """
-        if ic_df.empty:
-            # Fallback to default features
-            return [
-                f"sentiment_zscore_{window}d" 
-                for window in self.config.window_sizes[:3]
-            ]
-        
-        # Filter to significant features if possible
-        significant = ic_df[ic_df["significant"]].copy()
-        
-        if len(significant) >= top_n:
-            df = significant
-        else:
-            df = ic_df
-        
-        # Get top features by absolute IC
-        top_features = df.sort_values("abs_ic", ascending=False).head(top_n)
-        
-        return top_features["feature"].tolist()
-
-
-class SignalGenerator:
-    """
-    Converts sentiment features into trading signals.
-    """
-    
-    def __init__(self, config: SentimentConfig):
-        """
-        Initialize the signal generator.
-        
-        Args:
-            config: Configuration parameters
-        """
-        self.config = config
-    
-    def generate_signals(
+    def _generate_signals_from_features(
         self,
         features_df: pd.DataFrame,
-        feature_cols: List[str],
-        thresholds: Dict[str, Tuple[float, float]] = None
+        feature_cols: List[str]
     ) -> pd.DataFrame:
         """
         Generate trading signals from sentiment features.
@@ -753,12 +610,11 @@ class SignalGenerator:
         Args:
             features_df: DataFrame with sentiment features
             feature_cols: List of features to use
-            thresholds: Custom thresholds for features
             
         Returns:
             DataFrame with signals
         """
-        df = features_df.copy()
+        df = features_df.copy().reset_index()
         
         # Filter to valid features
         valid_features = [col for col in feature_cols if col in df.columns]
@@ -773,15 +629,11 @@ class SignalGenerator:
             values = df[feature].dropna()
             
             # Set thresholds
-            if thresholds and feature in thresholds:
-                lower, upper = thresholds[feature]
-            else:
-                # Default: mean ± z_threshold * std
-                mean = values.mean()
-                std = values.std()
-                z = self.config.zscore_threshold
-                lower = mean - z * std
-                upper = mean + z * std
+            mean = values.mean()
+            std = values.std()
+            z = self.config.zscore_threshold
+            lower = mean - z * std
+            upper = mean + z * std
             
             # Generate discrete signals
             signal_col = f"{feature}_signal"
@@ -803,7 +655,7 @@ class SignalGenerator:
         
         return df
     
-    def create_signal_objects(
+    def _create_signal_objects(
         self, signals_df: pd.DataFrame
     ) -> List[Signal]:
         """
@@ -852,15 +704,12 @@ class SignalGenerator:
             # Ensure directory exists
             os.makedirs(os.path.dirname(self.config.signal_output_path), exist_ok=True)
             
-            # Convert to pyarrow table
-            signals_table = pa.Table.from_pylist([s.dict() for s in signals])
-            
-            # Write to parquet
-            pq.write_table(signals_table, self.config.signal_output_path)
+            # Save to parquet using core storage utility
+            save_to_parquet(signals, self.config.signal_output_path)
             
             # Optional: Save to DuckDB
             try:
-                save_to_duckdb(signals_table, "signals", mode="append")
+                save_to_duckdb(signals, "signals", mode="append")
             except Exception as e:
                 logger.warning(f"Failed to save to DuckDB: {e}")
             
@@ -895,14 +744,11 @@ def generate_signal(df: pd.DataFrame, price_df: pd.DataFrame = None, **params) -
     Returns:
         DataFrame containing features and signals
     """
-    # Extract parameters
-    text_col = params.get("text_col", "text")
-    time_col = params.get("time_col", "timestamp")
+    # Extract key parameters
     model_name = params.get("model_name", DEFAULT_MODEL_NAME)
     window_sizes = params.get("window_sizes", DEFAULT_WINDOW_SIZES)
     output_dir = params.get("output_dir", None)
     signal_output_path = params.get("signal_output_path", "data/signals.parquet")
-    save_signals = params.get("save_signals", True)
     
     # Create configuration
     config = SentimentConfig(
@@ -912,87 +758,12 @@ def generate_signal(df: pd.DataFrame, price_df: pd.DataFrame = None, **params) -
         signal_output_path=signal_output_path
     )
     
-    logger.info("Starting sentiment signal generation pipeline")
-    
-    # 1. Preprocess tweet data
-    logger.info("Preprocessing social media data")
-    preprocessor = TextPreprocessor()
-    processed_df = preprocessor.preprocess_dataframe(
-        df, text_col=text_col, time_col=time_col
-    )
-    
-    # 2. Extract sentiment
-    logger.info(f"Extracting sentiment using {model_name}")
-    analyzer = SentimentAnalyzer(model_name=model_name)
-    sentiment_scores = analyzer.analyze_batch(
-        processed_df[text_col].tolist(), batch_size=16
-    )
-    
-    # 3. Create features
-    logger.info("Creating sentiment features")
-    feature_engine = SentimentFeatureEngine(config)
-    
-    # 3.1. Aggregate to daily sentiment
-    daily_sentiment = feature_engine.aggregate_daily(
-        processed_df, sentiment_scores, time_col=time_col
-    )
-    
-    # 3.2. Create time-series features
-    features_df = feature_engine.create_features(daily_sentiment)
-    
-    # 4. Analyze performance if price data is available
-    feature_cols = []
+    # Add price_df to params if provided
     if price_df is not None:
-        logger.info("Analyzing correlation with price movements")
-        performance = PerformanceAnalyzer(config)
-        
-        # 4.1. Compute lag correlations
-        lag_corrs = performance.compute_lag_correlations(features_df, price_df)
-        performance.plot_lag_correlations(lag_corrs)
-        
-        # 4.2. Identify potential features
-        for window in config.window_sizes:
-            feature_cols.extend([
-                f"sentiment_sma_{window}d",
-                f"sentiment_zscore_{window}d", 
-                f"sentiment_roc_{window}d",
-                f"sentiment_ema_{window}d",
-                f"sentiment_momentum_{window}d"
-            ])
-        
-        # 4.3. Compute information coefficients
-        ic_df = performance.compute_information_coefficient(
-            features_df, price_df, feature_cols
-        )
-        performance.plot_ic_table(ic_df)
-        
-        # 4.4. Get best features for signal generation
-        feature_cols = performance.get_best_features(ic_df, top_n=5)
-    else:
-        # Default features if no price data
-        feature_cols = [
-            f"sentiment_zscore_{window}d" for window in config.window_sizes[:3]
-        ]
+        params["price_df"] = price_df
     
-    # 5. Generate signals
-    logger.info("Generating trading signals")
-    generator = SignalGenerator(config)
-    signals_df = generator.generate_signals(features_df, feature_cols)
+    # Initialize signal generator
+    generator = SentimentSignalGenerator(config=config, **params)
     
-    # 6. Save signals if requested
-    if save_signals:
-        signal_objects = generator.create_signal_objects(signals_df)
-        generator.save_signals(signal_objects)
-    
-    logger.info("Sentiment signal generation complete")
-    return signals_df
-
-
-if __name__ == "__main__":
-    # Set up logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("Run this module through the analytics pipeline or import functions separately.")
+    # Generate signals
+    return generator.generate_signal(df=df)
