@@ -1,0 +1,30 @@
+Model-Validation Report
+Purpose: Prove to reviewers that the strategy is not an over-fit toy.
+Form: Reproducible notebook → rendered to PDF & HTML in CI.
+
+File layout
+bash
+Copy
+Edit
+notebooks/
+└── validation/
+    ├── 01_data_checks.ipynb      # raw feed sanity
+    ├── 02_signal_tests.ipynb     # IC, auto-corr, regime alignment
+    ├── 03_backtest_validation.ipynb
+    └── template_report.ipynb     # generic skeleton
+docs/reports/
+    └── regime_adaptive_strategy.pdf   # CI-exported
+Skeleton notebook sections
+
+#	Section	Must include
+1	Objective	Hypothesis, signal description, time period.
+2	Data provenance	Feed source, version, row counts, gaps chart.
+3	Leakage / look-ahead tests	Shifted-join check, gap between signal timestamp and trade timestamp.
+4	Train / validation split	Walk-forward or expanding-window table.
+5	Performance metrics	Annualised Sharpe, Sortino, max-DD, hit-rate, turnover; show OOS vs. IS.
+6	Robustness sweeps	• Fee sensitivity plot (0–20 bps)
+• Slippage stress
+• Parameter grid heatmap (look-back × entry-zscore).
+7	Statistical checks	Ljung-Box on residuals, White reality-check p-value, stationarity test on spread if stat-arb.
+8	Risk controls	Kelly fraction vs. realised DD; VaR / ES table.
+9	Conclusion & next steps	Failure modes, deployment readiness.

@@ -1,0 +1,19 @@
+Architecture Decision Records (ADRs)
+
+Item	Recommendation
+Folder & naming	docs/adr/0001-duckdb_vs_postgres.md, 0002-prefect_vs_airflow.md, …
+Use zero-padded incremental numbers so diffs stay readable.
+Template (borrowed from Mike Nygard)	md<br># \<TITLE\><br><br>Status: {Proposed | Accepted | Superseded}<br>Deciders: <names><br>Date: YYYY-MM-DD<br><br>## Context<br>_Why is a decision needed? List constraints._<br><br>## Decision<br>_What option are we choosing?_ 1-2 sentences.<br><br>## Consequences<br>*Positive*: …<br>*Negative*: …<br><br>## Alternatives considered<br>*Option A* – …<br>*Option B* – …
+Process	1) Open a PR with the ADR file.
+2) Reviewers comment on trade-offs rather than code.
+3) Merge → status = Accepted.
+4) If replaced, add Superseded-By: 0005… footer.
+Tooling (optional)	adr-tools CLI (brew install adr-tools) auto-generates skeleton files and updates an index.
+Doc integration	MkDocs adr/index.md lists ALL ADRs via {!adr/} include. Gives recruiters a single page of design history.
+Minimal set you should write now
+
+#	Working title	Why it matters
+0001	“DuckDB for local columnar storage”	Justify O(GB) in-process analytics vs. external DB.
+0002	“Prefect over Airflow”	Design decision about orchestration.
+0003	“Hexagonal architecture + provider plugins”	Explains extensibility goal.
+0004	“Vectorbt chosen for back-tests”	Covers speed, vectorisation, numpy-first API.

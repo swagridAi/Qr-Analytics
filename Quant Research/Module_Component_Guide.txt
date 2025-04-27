@@ -1,0 +1,64 @@
+analytics/
+Pure-function research modules that accept DataFrames & return signals.
+Sub-packages group related models: volatility, regime, stat-arb, sentiment.
+Each exports a generate_signal(df, **params) API and writes results to signals.parquet.
+
+backtest/
+Converts signals into orders & positions using vectorbt under the hood.
+
+engine.py wires up data, signals, fees, risk limits.
+
+strategies/ contains strategy logic; modules register via entry-points for CLI auto-discovery.
+
+risk.py adds Kelly/vol-target sizing, stop-loss, draw-down guards.
+
+
+dashboard/
+Streamlit app for live monitoring & presentation.
+
+app.py bootstraps the UI.
+
+components/ holds reusable Plotly widgets (price chart, sentiment index, PnL curve, trade blotter).
+
+
+pipelines/
+Prefect / Airflow DAG scripts encapsulating:
+ETL → analytics → back-test → dashboard refresh.
+Reads YAMLs in configs/ for provider & parameter selection.
+
+cli.py
+Thin CLI entry point:
+python -m quant_research run configs/crypto_intraday.yaml
+Loads the DAG and executes it (sync for dev, async for prod).
+
+configs/
+Human-readable runtime configs (symbols, providers, schedule); orchestration reads these.
+
+data/
+Local Parquet & DB files (excluded from git).
+
+notebooks/
+Exploratory research, signal validation, performance deep-dives; doubles as living docs.
+
+tests/
+Unit tests for each layer + smoke-test DAG that mocks providers and runs a mini pipeline.
+
+core/
+Hexagon centre: all domain-agnostic logic.
+
+models.py: Pydantic dataclasses (PriceBar, Signal, Trade, etc.)
+
+storage.py: DuckDB helpers, Arrow-in / Parquet-out
+
+event_bus.py: Async pub/sub layer (in-proc queue in dev, Kafka in prod)
+
+
+providers/
+Edge-layer adapters. Each file implements BaseProvider, retrieving raw data and emitting validated PriceBar or custom records.
+New domains → add a file here; nothing else changes.
+
+Dockerfile / docker-compose.yml
+One-command local stack: app container + DuckDB volume + optional Kafka.
+
+.github/workflows/ci.yml
+Runs lint → type-check → unit/integration tests.

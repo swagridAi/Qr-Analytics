@@ -1,0 +1,10 @@
+Deliverables:
+
+Streamlit app
+Content: Live price chart + regime overlay, sentiment index, equity curve, open arb spreads table.
+
+Research memos
+Content: Two-page PDF per signal (hypothesis, data, method, OOS results, stress tests).
+
+Docs site
+Content: mkdocs-material site, auto-generated API docs, architecture diagram, “10-min quick-start” tutorial.

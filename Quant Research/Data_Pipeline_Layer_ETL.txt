@@ -1,0 +1,19 @@
+Deliverables: Providers
+
+crypto_ccxt.py – OHLCV/websocket
+
+onchain.py – Etherscan/Glassnode
+
+sentiment_twitter.py – Twint + HF transformers
+
+
+Deliverables: Schema & storage
+
+core/models.py ← PriceBar, Signal (pydantic) → Parquet in DuckDB
+
+change-data-capture to Kafka topic raw_ticks
+
+
+Deliverables: Quality checks
+
+Great Expectations suite; daily CI badge on data-freshness & nulls

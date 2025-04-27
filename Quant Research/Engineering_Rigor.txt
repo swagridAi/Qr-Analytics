@@ -1,0 +1,11 @@
+Deliverable: CI/CD
+Detail: GitHub Actions: pytest -q, mypy, flake8, coverage ≥ 85%.
+
+Deliverable: Containers
+Detail: Dockerfile (app), docker-compose.yml (DuckDB + Streamlit)
+
+Deliverable: Versioning & changelog
+Detail: Semantic tags (v*.*.*), CHANGELOG.md
+
+Deliverable: Security
+Detail: .env.example, secrets-scanner, API-key vault guide

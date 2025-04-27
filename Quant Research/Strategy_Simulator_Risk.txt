@@ -1,0 +1,11 @@
+Component: Back-test core
+Deliverables: vectorbt wrappers, fee/slippage model, position-sizer (vol-scaled).
+
+Component: Strategy templates
+Deliverables: Momentum, mean-reversion, cross-exchange arb, regime-adaptive allocator.
+
+Component: Metrics & bias checks
+Deliverables: Sharpe, Sortino, max-DD, turnover; automatic look-ahead & survivorship tests.
+
+Component: (Stretch) RL executor
+Deliverables: stable-baselines3 PPO against micro-price environment; logs ep-reward & latency.

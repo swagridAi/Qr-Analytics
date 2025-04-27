@@ -1,0 +1,24 @@
+┌───────────── Orchestration (Prefect) ─────────────┐
+           │                                                   │
+           │    pipelines/crypto_intraday.yaml  pipelines/…    │
+           └───────────────┬─────────────────┬─────────────────┘
+                           │                 │
+                    ┌──────▼──────┐   ┌──────▼──────┐
+                    │  Providers  │   │  Providers  │      … more plugins
+                    │  crypto_ccxt│   │equities_yf  │
+                    └──────┬──────┘   └──────┬──────┘
+                           │ implements BaseProvider
+                ┌──────────▼───────────┐
+                │  Core Models & I/O   │  ← pydantic, DuckDB
+                └──────────┬───────────┘
+                           │ generic DataFrames / Events
+          ┌────────────────▼────────────────┐
+          │        Analytics Engine         │  ← vol, regime, stat‑arb
+          └────────────────┬────────────────┘
+                           │ signals.parquet
+                ┌──────────▼──────────┐
+                │   Back‑test Core    │  ← vectorbt
+                └──────────┬──────────┘
+                           │ performance.csv
+                ┌──────────▼──────────┐
+                │  Dashboard (UI)     │  ← Streamlit

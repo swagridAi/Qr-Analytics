@@ -1,0 +1,11 @@
+Module: Volatility Lab
+Deliverables: Jupyter notebook + Python module using arch for GARCH, realized-vol comparisons.
+
+Module: Regime Detector
+Deliverables: HMM (hmmlearn) + change-point (ruptures); exports state_probabilities.parquet.
+
+Module: Stat-Arb Signals
+Deliverables: Cointegration finder, rolling z-scores; notebook with half-life test & t-stats.
+
+Module: Sentiment Alpha
+Deliverables: Transformer-sentiment scorer; cross-corr plots, lag regression IC table.
