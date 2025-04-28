@@ -53,11 +53,10 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-# Local imports - now importing from data_utils
-from quant_research.analytics.common.data_utils import (
+# Local imports - importing from consolidated data modules
+from quant_research.analytics.common.data import (
     # Financial calculations
     calculate_returns,
-    calculate_momentum,
     calculate_volatility,
     calculate_zscore,
     
@@ -67,7 +66,10 @@ from quant_research.analytics.common.data_utils import (
     add_rolling_features,
     
     # Data normalization 
-    normalize_data
+    normalize_data,
+    
+    # ADX calculation
+    calculate_adx
 )
 
 # Configure logger
@@ -172,7 +174,7 @@ def add_technical_features(
         result[f'ema_{window}'] = result[price_col].ewm(span=window).mean()
     
     if 'momentum' in indicators:
-        result[f'momentum_{window}'] = calculate_momentum(result[price_col], window=window)
+        result[f'momentum_{window}'] = calculate_returns(result[price_col], method='pct', periods=window)
     
     if 'volatility' in indicators:
         result[f'volatility_{window}'] = calculate_volatility(result['returns'], window=window)
@@ -345,9 +347,10 @@ def add_trend_features(
                 ).astype(int)
     
     # Add directional movement indicators
-    result[f'adx_{windows[0]}'] = calculate_adx(
-        df, high_col='high', low_col='low', close_col='close', window=windows[0]
-    ) if all(col in df.columns for col in ['high', 'low', 'close']) else None
+    if all(col in df.columns for col in ['high', 'low', 'close']):
+        result[f'adx_{windows[0]}'] = calculate_adx(
+            df, high_col='high', low_col='low', close_col='close', window=windows[0]
+        )
     
     # Log generated indicators
     added_indicators = [col for col in result.columns if col not in df.columns]
@@ -421,7 +424,8 @@ def add_volatility_features(
             result[returns_col], 
             window=window, 
             annualize=annualize, 
-            trading_days=trading_days
+            trading_days=trading_days,
+            method='std'
         )
         
         # Apply log transformation if requested
@@ -449,216 +453,43 @@ def add_volatility_features(
     # Add range-based volatility estimators if OHLC data is available
     if all(col in result.columns for col in ['high', 'low']):
         # Parkinson estimator (uses high-low range)
-        result['parkinson_vol'] = parkinson_volatility(
+        result['parkinson_vol'] = calculate_volatility(
             result,
             window=windows[0],
             annualize=annualize,
-            trading_days=trading_days
+            trading_days=trading_days,
+            method='parkinson'
         )
         
         # Add Garman-Klass if open data available
         if 'open' in result.columns:
-            result['garman_klass_vol'] = garman_klass_volatility(
+            result['garman_klass_vol'] = calculate_volatility(
                 result,
                 window=windows[0],
                 annualize=annualize,
-                trading_days=trading_days
+                trading_days=trading_days,
+                method='garman_klass'
             )
     
     # Add GARCH volatility if requested
     if include_garch:
         try:
-            from arch import arch_model
-            
-            # Fit a simple GARCH(1,1) model
-            returns = result[returns_col].dropna().values
-            
-            if len(returns) > 100:  # Need sufficient data for GARCH
-                model = arch_model(returns, vol='Garch', p=1, q=1)
-                model_fit = model.fit(disp='off')
-                
-                # Get conditional volatility
-                garch_vol = model_fit.conditional_volatility
-                
-                # Align with original DataFrame
-                vol_series = pd.Series(
-                    garch_vol, 
-                    index=result.index[-len(garch_vol):]
-                )
-                
-                # Annualize if requested
-                if annualize:
-                    vol_series = vol_series * np.sqrt(trading_days)
-                
-                result['garch_vol'] = vol_series
-                
-                logger.info("Added GARCH volatility estimates")
-            else:
-                logger.warning("Insufficient data for GARCH modeling")
-        except ImportError:
-            logger.warning("arch package not available for GARCH modeling")
+            result['garch_vol'] = calculate_volatility(
+                result[returns_col],
+                window=windows[0],
+                annualize=annualize,
+                trading_days=trading_days,
+                method='garch'
+            )
+            logger.info("Added GARCH volatility estimates")
+        except (ImportError, ValueError) as e:
+            logger.warning(f"Failed to add GARCH volatility: {e}")
     
     # Log generated indicators
     added_indicators = [col for col in result.columns if col not in df.columns]
     logger.info(f"Added {len(added_indicators)} volatility indicators")
     
     return result
-
-
-def parkinson_volatility(
-    df: pd.DataFrame,
-    high_col: str = 'high',
-    low_col: str = 'low',
-    window: int = 20,
-    annualize: bool = True,
-    trading_days: int = 252
-) -> pd.Series:
-    """
-    Calculate Parkinson volatility estimator using high-low range.
-    
-    Args:
-        df: DataFrame with high and low prices
-        high_col: Column name for high prices
-        low_col: Column name for low prices
-        window: Rolling window size
-        annualize: Whether to annualize the result
-        trading_days: Number of trading days per year
-        
-    Returns:
-        Series with Parkinson volatility estimates
-    """
-    # Calculate log high/low range
-    log_hl = np.log(df[high_col] / df[low_col])
-    squared_log_range = log_hl**2
-    
-    # Parkinson estimator with scaling factor 1/(4*ln(2))
-    scaling_factor = 1.0 / (4.0 * np.log(2.0))
-    vol = np.sqrt(
-        (squared_log_range * scaling_factor).rolling(window=window).mean()
-    )
-    
-    # Annualize if requested
-    if annualize:
-        vol = vol * np.sqrt(trading_days)
-    
-    return vol
-
-
-def garman_klass_volatility(
-    df: pd.DataFrame,
-    open_col: str = 'open',
-    high_col: str = 'high',
-    low_col: str = 'low',
-    close_col: str = 'close',
-    window: int = 20,
-    annualize: bool = True,
-    trading_days: int = 252
-) -> pd.Series:
-    """
-    Calculate Garman-Klass volatility estimator using OHLC data.
-    
-    Args:
-        df: DataFrame with OHLC data
-        open_col: Column name for open prices
-        high_col: Column name for high prices
-        low_col: Column name for low prices
-        close_col: Column name for close prices
-        window: Rolling window size
-        annualize: Whether to annualize the result
-        trading_days: Number of trading days per year
-        
-    Returns:
-        Series with Garman-Klass volatility estimates
-    """
-    # Calculate log ranges
-    log_hl = np.log(df[high_col] / df[low_col])
-    log_co = np.log(df[close_col] / df[open_col])
-    
-    # Garman-Klass components
-    hl_part = 0.5 * log_hl**2
-    co_part = (2 * np.log(2) - 1) * log_co**2
-    
-    # Full estimator
-    estimator = hl_part - co_part
-    
-    # Calculate rolling volatility
-    vol = np.sqrt(estimator.rolling(window=window).mean())
-    
-    # Annualize if requested
-    if annualize:
-        vol = vol * np.sqrt(trading_days)
-    
-    return vol
-
-
-def calculate_adx(
-    df: pd.DataFrame,
-    high_col: str = 'high',
-    low_col: str = 'low',
-    close_col: str = 'close',
-    window: int = 14
-) -> pd.Series:
-    """
-    Calculate the Average Directional Index (ADX) indicator.
-    
-    The ADX measures trend strength regardless of direction.
-    
-    Args:
-        df: DataFrame with high, low, and close prices
-        high_col: Column name for high prices
-        low_col: Column name for low prices
-        close_col: Column name for close prices
-        window: Window size for calculations
-        
-    Returns:
-        Series with ADX values
-    """
-    # Make a copy to avoid modifying original
-    result = df.copy()
-    
-    # Calculate price changes
-    result['high_change'] = result[high_col] - result[high_col].shift(1)
-    result['low_change'] = result[low_col].shift(1) - result[low_col]
-    
-    # Calculate Directional Movement
-    result['plus_dm'] = np.where(
-        (result['high_change'] > result['low_change']) & (result['high_change'] > 0),
-        result['high_change'],
-        0
-    )
-    
-    result['minus_dm'] = np.where(
-        (result['low_change'] > result['high_change']) & (result['low_change'] > 0),
-        result['low_change'],
-        0
-    )
-    
-    # Calculate True Range
-    result['tr'] = np.maximum(
-        np.maximum(
-            result[high_col] - result[low_col],
-            np.abs(result[high_col] - result[close_col].shift(1))
-        ),
-        np.abs(result[low_col] - result[close_col].shift(1))
-    )
-    
-    # Smooth with EMA
-    result['smoothed_tr'] = result['tr'].rolling(window=window).mean()
-    result['smoothed_plus_dm'] = result['plus_dm'].rolling(window=window).mean()
-    result['smoothed_minus_dm'] = result['minus_dm'].rolling(window=window).mean()
-    
-    # Calculate Directional Indicators
-    result['plus_di'] = 100 * result['smoothed_plus_dm'] / result['smoothed_tr']
-    result['minus_di'] = 100 * result['smoothed_minus_dm'] / result['smoothed_tr']
-    
-    # Calculate Directional Index
-    result['dx'] = 100 * np.abs(result['plus_di'] - result['minus_di']) / (result['plus_di'] + result['minus_di'])
-    
-    # Calculate ADX (smoothed DX)
-    adx = result['dx'].rolling(window=window).mean()
-    
-    # Clean up intermediate columns
-    return adx
 
 
 #------------------------------------------------------------------------
@@ -719,7 +550,7 @@ def add_zscore_features(
             
         for window in windows:
             for method in methods:
-                # Calculate z-score
+                # Calculate z-score using consolidated implementation
                 zscore = calculate_zscore(result[col], window=window, method=method)
                 
                 # Create column name
@@ -1244,7 +1075,7 @@ def create_ml_feature_set(
         cols_to_normalize = [col for col in numeric_cols 
                             if col != price_col and col != volume_col]
         
-        # Normalize
+        # Normalize using the consolidated implementation
         features_df = normalize_data(
             features_df, 
             columns=cols_to_normalize,

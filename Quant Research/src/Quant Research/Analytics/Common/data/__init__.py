@@ -40,7 +40,10 @@ from .financial_metrics import (
     calculate_cumulative_returns,
     calculate_drawdowns,
     calculate_momentum,
-    calculate_volatility
+    calculate_volatility,
+    parkinson_volatility,
+    garman_klass_volatility,
+    calculate_adx
 )
 
 from .cleaning import (
@@ -72,7 +75,8 @@ __all__ = [
     
     # Financial metrics
     'calculate_returns', 'calculate_cumulative_returns', 'calculate_drawdowns',
-    'calculate_momentum', 'calculate_volatility',
+    'calculate_momentum', 'calculate_volatility', 'parkinson_volatility', 
+    'garman_klass_volatility', 'calculate_adx',
     
     # Data cleaning
     'detect_outliers', 'handle_outliers', 'normalize_data', 'calculate_zscore',
