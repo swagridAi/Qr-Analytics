@@ -1,184 +1,270 @@
 """
 Validation Utilities
 
-This module provides validation functions for parameters, data, and signals used
-across all analytics modules. It helps ensure that inputs are valid, consistent, 
-and appropriate for the intended use.
+This module provides reusable validation functions and utilities to simplify
+and standardize validation logic throughout the codebase. It reduces code duplication
+and provides consistent error handling patterns.
 
 Features:
-- Parameter validation for various types and constraints
-- Data validation for DataFrames and time series
-- Signal validation for generated signals
-- Validation context managers and decorators
-- Schema validation for structured data
+- Core validation helpers for common patterns
+- Parameter validation utilities
+- DataFrame validation functions
+- Time series specific validation
+- Validation error collection and reporting
 
 Usage:
     ```python
-    from quant_research.analytics.common.validation import (
-        validate_numeric_param,
+    from quant_research.core.validation_utils import (
+        validate_param_base,
+        validate_type,
+        validate_numeric,
         validate_dataframe,
-        validate_signals,
-        ValidationError
+        ValidationErrorCollector
     )
     
-    # Validate parameters
-    window = validate_numeric_param(window, "window", min_value=1, max_value=1000)
+    # Basic parameter validation
+    def my_function(window_size: int, threshold: float = 0.5):
+        # Validate parameters
+        window_size = validate_numeric(
+            window_size, 'window_size', min_value=1, integer_only=True
+        )
+        threshold = validate_numeric(
+            threshold, 'threshold', min_value=0.0, max_value=1.0, allow_none=True, default=0.5
+        )
+        
+        # Function logic...
     
-    # Validate input DataFrame
-    result, errors = validate_dataframe(
-        df, 
-        required_columns=['timestamp', 'close'],
-        min_rows=10
-    )
-    if errors:
-        raise ValidationError(f"Invalid input data: {errors}")
-    
-    # Validate generated signals
-    valid_signals = validate_signals(signals, expected_columns=['timestamp', 'value'])
+    # Validation with error collection
+    def validate_input_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
+        collector = ValidationErrorCollector()
+        
+        # Validate DataFrame has required columns
+        has_columns, missing = validate_columns_exist(
+            df, ['timestamp', 'close', 'volume'], raise_error=False
+        )
+        
+        if not has_columns:
+            collector.add_error(f"Missing required columns: {', '.join(missing)}")
+            
+        # Validate DataFrame has enough rows
+        if len(df) < 100:
+            collector.add_error(f"Insufficient data: {len(df)} rows (minimum 100)")
+        
+        # Check if we have any errors
+        if collector.has_errors():
+            logger.warning(f"Validation errors: {collector.get_error_message()}")
+            return df, False
+            
+        return df, True
     ```
 """
 
 # Standard library imports
-import inspect
 import logging
-import warnings
-from contextlib import contextmanager
 from datetime import datetime, timedelta
-from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, TypeVar, Generic, Set
 
 # Third-party imports
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ValidationError as PydanticValidationError, validator
+
+# Local imports
+from quant_research.core.errors import (
+    ValidationError, DataValidationError, ParameterError,
+    create_param_error, create_missing_columns_error, create_type_error, create_value_error
+)
 
 # Configure module logger
-logger = logging.getLogger("quant_research.analytics.common.validation")
+logger = logging.getLogger("quant_research.core.validation_utils")
+
+# Type variables for generic functions
+T = TypeVar('T')
+DFType = TypeVar('DFType', bound=pd.DataFrame)
 
 #------------------------------------------------------------------------
-# Exception Classes
+# Base Validation Utilities
 #------------------------------------------------------------------------
 
-class ValidationError(Exception):
+def validate_param_base(
+    value: T,
+    param_name: str,
+    allow_none: bool = False,
+    default: Optional[T] = None,
+    source: Optional[str] = None
+) -> Optional[T]:
     """
-    Exception raised for validation errors.
+    Base validation function for all parameter types.
     
-    This error is raised when input validation fails and should be caught
-    by the calling function to handle appropriately.
+    This function provides a foundation for parameter validation by handling
+    None values consistently according to the specified options.
     
-    Attributes:
-        message: Explanation of the error
-        param_name: Name of the parameter that failed validation
-        value: Value that failed validation
-        source: Source of the validation error
-    """
-    def __init__(
-        self, 
-        message: str, 
-        param_name: Optional[str] = None,
-        value: Any = None,
-        source: Optional[str] = None
-    ):
-        self.message = message
-        self.param_name = param_name
-        self.value = value
-        self.source = source
+    Args:
+        value: The parameter value to validate
+        param_name: Name of the parameter
+        allow_none: Whether None is an allowed value
+        default: Default value to use if value is None and allow_none is False
+        source: Source of the validation (for error reporting)
         
-        # Format the error message
-        full_message = message
-        if param_name:
-            full_message = f"{message} (parameter: {param_name})"
-        if source:
-            full_message = f"{full_message} [source: {source}]"
-            
-        super().__init__(full_message)
-
-
-class DataValidationError(ValidationError):
-    """
-    Exception raised for data validation errors.
-    
-    This error is raised when input data validation fails and includes
-    information about the specific data issues.
-    
-    Attributes:
-        message: Explanation of the error
-        data_info: Dictionary with information about the data
-        errors: List of specific validation errors
-    """
-    def __init__(
-        self, 
-        message: str, 
-        data_info: Optional[Dict[str, Any]] = None,
-        errors: Optional[List[str]] = None
-    ):
-        self.data_info = data_info or {}
-        self.errors = errors or []
+    Returns:
+        The validated value, default value, or None
         
-        # Format the error message
-        full_message = message
-        if errors:
-            full_message = f"{message}: {'; '.join(errors)}"
-            
-        super().__init__(full_message, source="data_validation")
+    Raises:
+        ParameterError: If value is None and neither allow_none nor default is provided
+    """
+    if value is None:
+        if allow_none:
+            return None
+        elif default is not None:
+            return default
+        else:
+            raise create_param_error(param_name, "must not be None", source=source)
+    return value
 
 
-class SchemaValidationError(ValidationError):
+def validate_constraint(
+    value: T,
+    param_name: str,
+    constraint_func: Callable[[T], bool],
+    failure_message: str,
+    source: Optional[str] = None
+) -> T:
     """
-    Exception raised for schema validation errors.
+    Generic constraint validator for parameters.
     
-    This error is raised when data does not conform to the expected schema.
+    This function tests a value against a constraint function and raises
+    an error with the specified message if the constraint is not satisfied.
     
-    Attributes:
-        message: Explanation of the error
-        schema_errors: Dictionary mapping fields to error messages
-    """
-    def __init__(
-        self, 
-        message: str, 
-        schema_errors: Optional[Dict[str, str]] = None
-    ):
-        self.schema_errors = schema_errors or {}
+    Args:
+        value: The parameter value to validate
+        param_name: Name of the parameter
+        constraint_func: Function that returns True if the constraint is satisfied
+        failure_message: Error message if constraint fails
+        source: Source of the validation (for error reporting)
         
-        # Format the error message
-        full_message = message
-        if schema_errors:
-            error_details = "; ".join([f"{field}: {error}" for field, error in schema_errors.items()])
-            full_message = f"{message}: {error_details}"
-            
-        super().__init__(full_message, source="schema_validation")
+    Returns:
+        The validated value
+        
+    Raises:
+        ParameterError: If the constraint is not satisfied
+        
+    Example:
+        ```python
+        # Validate a parameter is positive
+        value = validate_constraint(value, 'param', lambda x: x > 0, "must be positive")
+        
+        # Validate a string parameter has a minimum length
+        name = validate_constraint(name, 'name', lambda x: len(x) >= 3, "must be at least 3 characters")
+        ```
+    """
+    if not constraint_func(value):
+        raise create_param_error(param_name, failure_message, value, source=source)
+    return value
 
 
 #------------------------------------------------------------------------
 # Parameter Validation Functions
 #------------------------------------------------------------------------
 
-def validate_numeric_param(
-    value: Any, 
+def validate_type(
+    value: Any,
+    param_name: str,
+    expected_type: Union[Type, Tuple[Type, ...]],
+    allow_none: bool = False,
+    default: Optional[Any] = None,
+    source: Optional[str] = None
+) -> Any:
+    """
+    Validate that a parameter is of the expected type.
+    
+    Args:
+        value: The parameter value to validate
+        param_name: Name of the parameter
+        expected_type: Expected type or tuple of types
+        allow_none: Whether None is an allowed value
+        default: Default value to use if value is None and allow_none is False
+        source: Source of the validation (for error reporting)
+        
+    Returns:
+        The validated value
+        
+    Raises:
+        ParameterError: If the parameter is not of the expected type
+        
+    Example:
+        ```python
+        # Validate integer parameter
+        window = validate_type(window, 'window', int)
+        
+        # Validate string parameter with default
+        name = validate_type(name, 'name', str, default="default_name")
+        
+        # Validate parameter that can be int or float
+        threshold = validate_type(threshold, 'threshold', (int, float))
+        ```
+    """
+    # Handle None values
+    if value is None:
+        if allow_none:
+            return None
+        elif default is not None:
+            return default
+        else:
+            raise create_param_error(param_name, "must not be None", source=source)
+    
+    # Check type
+    if not isinstance(value, expected_type):
+        if isinstance(expected_type, tuple):
+            type_names = [t.__name__ for t in expected_type]
+            expected_str = ", ".join(type_names)
+            message = f"must be one of: {expected_str}, got {type(value).__name__}"
+        else:
+            message = f"must be {expected_type.__name__}, got {type(value).__name__}"
+        
+        raise create_param_error(param_name, message, value, source=source)
+    
+    return value
+
+
+def validate_numeric(
+    value: Any,
     param_name: str,
     min_value: Optional[float] = None,
     max_value: Optional[float] = None,
     allow_none: bool = False,
     default: Optional[float] = None,
-    integer_only: bool = False
-) -> Union[float, int, None]:
+    integer_only: bool = False,
+    source: Optional[str] = None
+) -> Optional[Union[int, float]]:
     """
-    Validate a numeric parameter.
+    Validate a numeric parameter with optional range constraints.
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
-        min_value: Minimum allowed value
-        max_value: Maximum allowed value
+        min_value: Minimum allowed value (inclusive)
+        max_value: Maximum allowed value (inclusive)
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
         integer_only: Whether to require integer values
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated numeric value (float, int, or None)
+        The validated numeric value
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate positive integer
+        window_size = validate_numeric(window_size, 'window_size', min_value=1, integer_only=True)
+        
+        # Validate probability between 0 and 1
+        threshold = validate_numeric(threshold, 'threshold', min_value=0.0, max_value=1.0)
+        
+        # Validate optional parameter with default
+        alpha = validate_numeric(alpha, 'alpha', min_value=0, allow_none=True, default=0.05)
+        ```
     """
     # Handle None value
     if value is None:
@@ -187,11 +273,7 @@ def validate_numeric_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Check if value is numeric
     try:
@@ -199,63 +281,73 @@ def validate_numeric_param(
             # For integers, convert and check if conversion preserves value
             numeric_value = int(value)
             if float(numeric_value) != float(value):
-                raise ValidationError(
-                    f"Parameter '{param_name}' must be an integer", 
-                    param_name=param_name, 
-                    value=value
+                raise create_param_error(
+                    param_name, "must be an integer", value, source=source
                 )
         else:
             numeric_value = float(value)
     except (ValueError, TypeError):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be numeric", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, "must be numeric", value, source=source
         )
     
     # Check minimum value
     if min_value is not None and numeric_value < min_value:
-        raise ValidationError(
-            f"Parameter '{param_name}' must be at least {min_value}", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must be at least {min_value}", numeric_value, source=source
         )
     
     # Check maximum value
     if max_value is not None and numeric_value > max_value:
-        raise ValidationError(
-            f"Parameter '{param_name}' must be at most {max_value}", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must be at most {max_value}", numeric_value, source=source
         )
     
     return numeric_value
 
 
-def validate_string_param(
+def validate_string(
     value: Any,
     param_name: str,
     allowed_values: Optional[List[str]] = None,
-    case_sensitive: bool = True,
+    min_length: Optional[int] = None,
+    max_length: Optional[int] = None,
     allow_none: bool = False,
-    default: Optional[str] = None
+    default: Optional[str] = None,
+    case_sensitive: bool = True,
+    source: Optional[str] = None
 ) -> Optional[str]:
     """
-    Validate a string parameter.
+    Validate a string parameter with optional constraints.
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
         allowed_values: List of allowed string values
-        case_sensitive: Whether validation is case-sensitive
+        min_length: Minimum allowed string length
+        max_length: Maximum allowed string length
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
+        case_sensitive: Whether validation is case-sensitive
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated string value or None
+        The validated string value
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate string from allowed values
+        method = validate_string(method, 'method', allowed_values=['mean', 'median', 'mode'])
+        
+        # Validate string length
+        name = validate_string(name, 'name', min_length=3, max_length=50)
+        
+        # Case-insensitive validation
+        color = validate_string(color, 'color', allowed_values=['red', 'green', 'blue'], case_sensitive=False)
+        ```
     """
     # Handle None value
     if value is None:
@@ -264,37 +356,44 @@ def validate_string_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Convert to string
     try:
         string_value = str(value)
-    except (ValueError, TypeError):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be convertible to string", 
-            param_name=param_name,
-            value=value
+    except Exception:
+        raise create_param_error(
+            param_name, "must be convertible to string", value, source=source
+        )
+    
+    # Check length constraints
+    if min_length is not None and len(string_value) < min_length:
+        raise create_param_error(
+            param_name, f"must have at least {min_length} characters", string_value, source=source
+        )
+    
+    if max_length is not None and len(string_value) > max_length:
+        raise create_param_error(
+            param_name, f"must have at most {max_length} characters", string_value, source=source
         )
     
     # Check allowed values if specified
     if allowed_values:
         if case_sensitive:
             if string_value not in allowed_values:
-                raise ValidationError(
-                    f"Parameter '{param_name}' must be one of: {', '.join(allowed_values)}", 
-                    param_name=param_name,
-                    value=value
+                raise create_param_error(
+                    param_name, 
+                    f"must be one of: {', '.join(allowed_values)}", 
+                    string_value, 
+                    source=source
                 )
         else:
             if string_value.lower() not in [v.lower() for v in allowed_values]:
-                raise ValidationError(
-                    f"Parameter '{param_name}' must be one of: {', '.join(allowed_values)} (case-insensitive)", 
-                    param_name=param_name,
-                    value=value
+                raise create_param_error(
+                    param_name, 
+                    f"must be one of: {', '.join(allowed_values)} (case-insensitive)", 
+                    string_value, 
+                    source=source
                 )
                 
             # Return the properly-cased version
@@ -305,93 +404,45 @@ def validate_string_param(
     return string_value
 
 
-def validate_bool_param(
-    value: Any,
-    param_name: str,
-    allow_none: bool = False,
-    default: Optional[bool] = None
-) -> Optional[bool]:
-    """
-    Validate a boolean parameter.
-    
-    Args:
-        value: Value to validate
-        param_name: Name of the parameter
-        allow_none: Whether None is an allowed value
-        default: Default value to use if value is None and allow_none is False
-        
-    Returns:
-        Validated boolean value or None
-        
-    Raises:
-        ValidationError: If validation fails
-    """
-    # Handle None value
-    if value is None:
-        if allow_none:
-            return None
-        elif default is not None:
-            return default
-        else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
-    
-    # Handle string values for convenience
-    if isinstance(value, str):
-        lower_value = value.lower()
-        if lower_value in ('true', 't', 'yes', 'y', '1'):
-            return True
-        elif lower_value in ('false', 'f', 'no', 'n', '0'):
-            return False
-    
-    # Handle numeric values
-    if isinstance(value, (int, float)):
-        if value == 1:
-            return True
-        elif value == 0:
-            return False
-    
-    # Handle boolean values
-    if isinstance(value, bool):
-        return value
-    
-    # If we get here, the value is not convertible to boolean
-    raise ValidationError(
-        f"Parameter '{param_name}' must be a boolean value", 
-        param_name=param_name,
-        value=value
-    )
-
-
-def validate_datetime_param(
+def validate_datetime(
     value: Any,
     param_name: str,
     min_datetime: Optional[datetime] = None,
     max_datetime: Optional[datetime] = None,
     allow_none: bool = False,
     default: Optional[datetime] = None,
-    format_str: Optional[str] = None
+    source: Optional[str] = None
 ) -> Optional[datetime]:
     """
-    Validate a datetime parameter.
+    Validate a datetime parameter with optional range constraints.
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
-        min_datetime: Minimum allowed datetime
-        max_datetime: Maximum allowed datetime
+        min_datetime: Minimum allowed datetime (inclusive)
+        max_datetime: Maximum allowed datetime (inclusive)
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
-        format_str: Format string for parsing string dates
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated datetime value or None
+        The validated datetime value
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate datetime in range
+        start_date = validate_datetime(start_date, 'start_date', 
+                                      min_datetime=datetime(2020, 1, 1),
+                                      max_datetime=datetime.now())
+        
+        # Validate with default
+        as_of_date = validate_datetime(as_of_date, 'as_of_date', 
+                                      allow_none=True,
+                                      default=datetime.now())
+        ```
     """
     # Handle None value
     if value is None:
@@ -400,11 +451,7 @@ def validate_datetime_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Convert to datetime
     try:
@@ -413,39 +460,30 @@ def validate_datetime_param(
         elif isinstance(value, pd.Timestamp):
             dt_value = value.to_pydatetime()
         elif isinstance(value, str):
-            if format_str:
-                dt_value = datetime.strptime(value, format_str)
-            else:
-                dt_value = pd.to_datetime(value).to_pydatetime()
+            dt_value = pd.to_datetime(value).to_pydatetime()
         else:
             dt_value = pd.to_datetime(value).to_pydatetime()
-    except (ValueError, TypeError):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be a valid datetime", 
-            param_name=param_name,
-            value=value
+    except Exception:
+        raise create_param_error(
+            param_name, "must be a valid datetime", value, source=source
         )
     
     # Check minimum datetime
     if min_datetime is not None and dt_value < min_datetime:
-        raise ValidationError(
-            f"Parameter '{param_name}' must be at or after {min_datetime}", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must be at or after {min_datetime}", dt_value, source=source
         )
     
     # Check maximum datetime
     if max_datetime is not None and dt_value > max_datetime:
-        raise ValidationError(
-            f"Parameter '{param_name}' must be at or before {max_datetime}", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must be at or before {max_datetime}", dt_value, source=source
         )
     
     return dt_value
 
 
-def validate_list_param(
+def validate_list(
     value: Any,
     param_name: str,
     item_type: Optional[Type] = None,
@@ -453,13 +491,14 @@ def validate_list_param(
     max_length: Optional[int] = None,
     allow_none: bool = False,
     default: Optional[List] = None,
-    item_validator: Optional[Callable[[Any, str], Any]] = None
+    item_validator: Optional[Callable[[Any, str], Any]] = None,
+    source: Optional[str] = None
 ) -> Optional[List]:
     """
-    Validate a list parameter.
+    Validate a list parameter with optional constraints.
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
         item_type: Expected type of list items
         min_length: Minimum allowed list length
@@ -467,12 +506,29 @@ def validate_list_param(
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
         item_validator: Function to validate each list item
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated list or None
+        The validated list
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate list of strings
+        columns = validate_list(columns, 'columns', item_type=str)
+        
+        # Validate list of positive integers
+        windows = validate_list(
+            windows, 'windows', 
+            item_type=int, 
+            item_validator=lambda x, n: validate_numeric(x, n, min_value=1)
+        )
+        
+        # Validate with length constraints
+        top_n = validate_list(top_n, 'top_n', min_length=1, max_length=10)
+        ```
     """
     # Handle None value
     if value is None:
@@ -481,11 +537,7 @@ def validate_list_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Convert to list if possible
     try:
@@ -501,26 +553,22 @@ def validate_list_param(
         else:
             # Try to convert to list as a last resort
             list_value = list(value)
-    except (ValueError, TypeError):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be convertible to a list", 
-            param_name=param_name,
-            value=value
+    except Exception:
+        raise create_param_error(
+            param_name, "must be convertible to a list", value, source=source
         )
     
     # Check list length
     if min_length is not None and len(list_value) < min_length:
-        raise ValidationError(
-            f"Parameter '{param_name}' must have at least {min_length} items", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must have at least {min_length} items", 
+            value, source=source
         )
     
     if max_length is not None and len(list_value) > max_length:
-        raise ValidationError(
-            f"Parameter '{param_name}' must have at most {max_length} items", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, f"must have at most {max_length} items", 
+            value, source=source
         )
     
     # Validate list items if type or validator provided
@@ -529,10 +577,10 @@ def validate_list_param(
         for i, item in enumerate(list_value):
             # Check item type
             if item_type is not None and not isinstance(item, item_type):
-                raise ValidationError(
-                    f"Item {i} in '{param_name}' must be of type {item_type.__name__}", 
-                    param_name=f"{param_name}[{i}]",
-                    value=item
+                raise create_param_error(
+                    f"{param_name}[{i}]", 
+                    f"must be of type {item_type.__name__}", 
+                    item, source=source
                 )
             
             # Apply item validator if provided
@@ -540,12 +588,11 @@ def validate_list_param(
                 try:
                     validated_item = item_validator(item, f"{param_name}[{i}]")
                     validated_items.append(validated_item)
-                except ValidationError as e:
-                    # Re-raise with more context
-                    raise ValidationError(
-                        f"Item {i} in '{param_name}' failed validation: {e}", 
-                        param_name=f"{param_name}[{i}]",
-                        value=item
+                except Exception as e:
+                    raise create_param_error(
+                        f"{param_name}[{i}]", 
+                        f"failed validation: {e}", 
+                        item, source=source
                     )
             else:
                 validated_items.append(item)
@@ -555,7 +602,7 @@ def validate_list_param(
     return list_value
 
 
-def validate_dict_param(
+def validate_dict(
     value: Any,
     param_name: str,
     key_type: Optional[Type] = None,
@@ -564,13 +611,14 @@ def validate_dict_param(
     allowed_keys: Optional[List[str]] = None,
     allow_none: bool = False,
     default: Optional[Dict] = None,
-    value_validator: Optional[Callable[[Any, str], Any]] = None
+    value_validator: Optional[Callable[[Any, str], Any]] = None,
+    source: Optional[str] = None
 ) -> Optional[Dict]:
     """
-    Validate a dictionary parameter.
+    Validate a dictionary parameter with optional constraints.
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
         key_type: Expected type of dictionary keys
         value_type: Expected type of dictionary values
@@ -579,12 +627,30 @@ def validate_dict_param(
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
         value_validator: Function to validate each dictionary value
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated dictionary or None
+        The validated dictionary
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate dictionary with required keys
+        options = validate_dict(options, 'options', required_keys=['mode', 'threshold'])
+        
+        # Validate dictionary values
+        mappings = validate_dict(
+            mappings, 'mappings', 
+            key_type=str, 
+            value_type=int, 
+            value_validator=lambda x, n: validate_numeric(x, n, min_value=0)
+        )
+        
+        # Validate with allowed keys
+        params = validate_dict(params, 'params', allowed_keys=['alpha', 'beta', 'gamma'])
+        ```
     """
     # Handle None value
     if value is None:
@@ -593,11 +659,7 @@ def validate_dict_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Convert to dictionary if possible
     try:
@@ -610,41 +672,42 @@ def validate_dict_param(
         else:
             # Try to convert to dict as a last resort
             dict_value = dict(value)
-    except (ValueError, TypeError):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be convertible to a dictionary", 
-            param_name=param_name,
-            value=value
+    except Exception:
+        raise create_param_error(
+            param_name, "must be convertible to a dictionary", value, source=source
         )
     
     # Check required keys
     if required_keys:
         missing_keys = [key for key in required_keys if key not in dict_value]
         if missing_keys:
-            raise ValidationError(
-                f"Parameter '{param_name}' is missing required keys: {', '.join(missing_keys)}", 
-                param_name=param_name,
-                value=value
+            raise create_param_error(
+                param_name, 
+                f"missing required keys: {', '.join(missing_keys)}", 
+                value, source=source
             )
     
     # Check allowed keys
     if allowed_keys:
         invalid_keys = [key for key in dict_value if key not in allowed_keys]
         if invalid_keys:
-            raise ValidationError(
-                f"Parameter '{param_name}' contains invalid keys: {', '.join(invalid_keys)}", 
-                param_name=param_name,
-                value=value
+            raise create_param_error(
+                param_name, 
+                f"contains invalid keys: {', '.join(invalid_keys)}", 
+                value, source=source
             )
     
     # Check key type
     if key_type is not None:
         invalid_keys = [key for key in dict_value if not isinstance(key, key_type)]
         if invalid_keys:
-            raise ValidationError(
-                f"Keys in '{param_name}' must be of type {key_type.__name__}", 
-                param_name=param_name,
-                value=value
+            keys_str = ", ".join(str(k) for k in invalid_keys[:5])
+            if len(invalid_keys) > 5:
+                keys_str += f" and {len(invalid_keys) - 5} more"
+            raise create_param_error(
+                param_name, 
+                f"keys must be of type {key_type.__name__}, invalid keys: {keys_str}", 
+                value, source=source
             )
     
     # Validate dictionary values
@@ -653,10 +716,10 @@ def validate_dict_param(
         for key, val in dict_value.items():
             # Check value type
             if value_type is not None and not isinstance(val, value_type):
-                raise ValidationError(
-                    f"Value for key '{key}' in '{param_name}' must be of type {value_type.__name__}", 
-                    param_name=f"{param_name}.{key}",
-                    value=val
+                raise create_param_error(
+                    f"{param_name}.{key}", 
+                    f"must be of type {value_type.__name__}", 
+                    val, source=source
                 )
             
             # Apply value validator if provided
@@ -664,12 +727,11 @@ def validate_dict_param(
                 try:
                     validated_val = value_validator(val, f"{param_name}.{key}")
                     validated_dict[key] = validated_val
-                except ValidationError as e:
-                    # Re-raise with more context
-                    raise ValidationError(
-                        f"Value for key '{key}' in '{param_name}' failed validation: {e}", 
-                        param_name=f"{param_name}.{key}",
-                        value=val
+                except Exception as e:
+                    raise create_param_error(
+                        f"{param_name}.{key}", 
+                        f"failed validation: {e}", 
+                        val, source=source
                     )
             else:
                 validated_dict[key] = val
@@ -679,92 +741,42 @@ def validate_dict_param(
     return dict_value
 
 
-def validate_enum_param(
-    value: Any,
-    param_name: str,
-    enum_values: List[Any],
-    case_insensitive: bool = False,
-    allow_none: bool = False,
-    default: Optional[Any] = None
-) -> Any:
-    """
-    Validate a parameter against a list of allowed values (enum).
-    
-    Args:
-        value: Value to validate
-        param_name: Name of the parameter
-        enum_values: List of allowed values
-        case_insensitive: Whether to ignore case for string values
-        allow_none: Whether None is an allowed value
-        default: Default value to use if value is None and allow_none is False
-        
-    Returns:
-        Validated enum value or None
-        
-    Raises:
-        ValidationError: If validation fails
-    """
-    # Handle None value
-    if value is None:
-        if allow_none:
-            return None
-        elif default is not None:
-            return default
-        else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
-    
-    # Case-insensitive comparison for strings
-    if case_insensitive and isinstance(value, str):
-        for enum_val in enum_values:
-            if isinstance(enum_val, str) and value.lower() == enum_val.lower():
-                return enum_val
-        
-        # Value not found in enum values
-        raise ValidationError(
-            f"Parameter '{param_name}' must be one of: {', '.join(map(str, enum_values))} (case-insensitive)", 
-            param_name=param_name,
-            value=value
-        )
-    
-    # Direct comparison
-    if value not in enum_values:
-        raise ValidationError(
-            f"Parameter '{param_name}' must be one of: {', '.join(map(str, enum_values))}", 
-            param_name=param_name,
-            value=value
-        )
-    
-    return value
-
-
-def validate_callable_param(
+def validate_callable(
     value: Any,
     param_name: str,
     expected_args: Optional[List[str]] = None,
     expected_return_type: Optional[Type] = None,
     allow_none: bool = False,
-    default: Optional[Callable] = None
+    default: Optional[Callable] = None,
+    source: Optional[str] = None
 ) -> Optional[Callable]:
     """
     Validate a callable parameter (function or method).
     
     Args:
-        value: Value to validate
+        value: The parameter value to validate
         param_name: Name of the parameter
         expected_args: List of expected argument names
         expected_return_type: Expected return type
         allow_none: Whether None is an allowed value
         default: Default value to use if value is None and allow_none is False
+        source: Source of the validation (for error reporting)
         
     Returns:
-        Validated callable or None
+        The validated callable
         
     Raises:
-        ValidationError: If validation fails
+        ParameterError: If validation fails
+        
+    Example:
+        ```python
+        # Validate a function with specific arguments
+        transformer = validate_callable(transformer, 'transformer', 
+                                       expected_args=['data', 'window'])
+                                       
+        # Validate a function with expected return type
+        scorer = validate_callable(scorer, 'scorer', expected_return_type=float)
+        ```
     """
     # Handle None value
     if value is None:
@@ -773,51 +785,170 @@ def validate_callable_param(
         elif default is not None:
             return default
         else:
-            raise ValidationError(
-                f"Parameter '{param_name}' must not be None", 
-                param_name=param_name,
-                value=value
-            )
+            raise create_param_error(param_name, "must not be None", source=source)
     
     # Check if value is callable
     if not callable(value):
-        raise ValidationError(
-            f"Parameter '{param_name}' must be callable", 
-            param_name=param_name,
-            value=value
+        raise create_param_error(
+            param_name, "must be callable", value, source=source
         )
     
     # Check expected arguments
     if expected_args is not None:
+        import inspect
         sig = inspect.signature(value)
         param_names = list(sig.parameters.keys())
         
         # Check if all expected arguments are present
-        for arg in expected_args:
-            if arg not in param_names:
-                raise ValidationError(
-                    f"Callable '{param_name}' is missing expected argument '{arg}'", 
-                    param_name=param_name,
-                    value=value
-                )
+        missing_args = [arg for arg in expected_args if arg not in param_names]
+        if missing_args:
+            raise create_param_error(
+                param_name, 
+                f"missing expected arguments: {', '.join(missing_args)}", 
+                value, source=source
+            )
     
     # Check return type if possible and expected
     if expected_return_type is not None:
+        import inspect
         sig = inspect.signature(value)
         if sig.return_annotation != inspect.Signature.empty:
             if sig.return_annotation != expected_return_type:
-                raise ValidationError(
-                    f"Callable '{param_name}' should return {expected_return_type.__name__}, but returns {sig.return_annotation.__name__}", 
-                    param_name=param_name,
-                    value=value
+                raise create_param_error(
+                    param_name, 
+                    f"should return {expected_return_type.__name__}, but returns {sig.return_annotation.__name__}", 
+                    value, source=source
                 )
     
     return value
 
 
 #------------------------------------------------------------------------
-# Data Validation Functions
+# DataFrame Validation Functions
 #------------------------------------------------------------------------
+
+def check_dataframe_type(df: Any) -> pd.DataFrame:
+    """
+    Validate and return a DataFrame object.
+    
+    Args:
+        df: Object to validate as DataFrame
+        
+    Returns:
+        Input object if it is a DataFrame
+        
+    Raises:
+        TypeError: If input is not a pandas DataFrame
+        
+    Example:
+        ```python
+        # Basic usage
+        df = check_dataframe_type(data)
+        ```
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"Expected pandas DataFrame, got {type(df).__name__}")
+    return df
+
+
+def validate_columns_exist(
+    df: pd.DataFrame,
+    required_columns: List[str],
+    raise_error: bool = True
+) -> Tuple[bool, List[str]]:
+    """
+    Check if required columns exist in DataFrame.
+    
+    Args:
+        df: DataFrame to check
+        required_columns: List of column names that must exist
+        raise_error: Whether to raise an exception if missing columns
+        
+    Returns:
+        Tuple of (success flag, list of missing columns)
+        
+    Raises:
+        ValidationError: If raise_error is True and columns are missing
+        
+    Example:
+        ```python
+        # Check with exception
+        validate_columns_exist(df, ['timestamp', 'close', 'volume'])
+        
+        # Check without exception
+        columns_present, missing = validate_columns_exist(
+            df, ['timestamp', 'close', 'volume'], raise_error=False
+        )
+        if not columns_present:
+            logger.warning(f"Missing columns: {missing}")
+        ```
+    """
+    df = check_dataframe_type(df)
+    
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns and raise_error:
+        raise create_missing_columns_error(missing_columns)
+    
+    return len(missing_columns) == 0, missing_columns
+
+
+def check_column_dtypes(
+    df: pd.DataFrame,
+    dtype_map: Dict[str, Type],
+    coerce: bool = False
+) -> pd.DataFrame:
+    """
+    Validate or coerce column data types.
+    
+    Args:
+        df: DataFrame to validate
+        dtype_map: Dictionary mapping column names to expected types
+        coerce: Whether to coerce columns to expected types
+        
+    Returns:
+        Original or coerced DataFrame
+        
+    Raises:
+        ValidationError: If types don't match and coerce is False
+        
+    Example:
+        ```python
+        # Validate types
+        check_column_dtypes(df, {'timestamp': 'datetime64[ns]', 'value': 'float64'})
+        
+        # Coerce types
+        df = check_column_dtypes(
+            df, 
+            {'timestamp': 'datetime64[ns]', 'value': 'float64'},
+            coerce=True
+        )
+        ```
+    """
+    df = check_dataframe_type(df)
+    result = df.copy() if coerce else df
+    errors = []
+    
+    for col, expected_type in dtype_map.items():
+        if col not in result.columns:
+            continue
+            
+        actual_type = result[col].dtype
+        type_matches = pd.api.types.is_dtype_equal(actual_type, expected_type)
+        
+        if not type_matches:
+            if coerce:
+                try:
+                    result[col] = result[col].astype(expected_type)
+                except Exception as e:
+                    errors.append(f"Column '{col}': {e}")
+            else:
+                errors.append(f"Column '{col}' has type {actual_type}, expected {expected_type}")
+    
+    if errors and not coerce:
+        raise ValidationError("\n".join(errors))
+        
+    return result
+
 
 def validate_dataframe(
     df: pd.DataFrame,
@@ -830,10 +961,10 @@ def validate_dataframe(
     check_index_uniqueness: bool = False,
     check_null_columns: Optional[List[str]] = None,
     check_non_negative_columns: Optional[List[str]] = None,
-    raise_exceptions: bool = False
+    raise_exception: bool = True
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Validate a pandas DataFrame against various criteria.
+    Comprehensive DataFrame validation with multiple checks.
     
     Args:
         df: DataFrame to validate
@@ -846,31 +977,53 @@ def validate_dataframe(
         check_index_uniqueness: Whether to check if index is unique
         check_null_columns: Columns to check for NULL values
         check_non_negative_columns: Columns to check for negative values
-        raise_exceptions: Whether to raise exceptions on validation errors
+        raise_exception: Whether to raise exception on validation errors
         
     Returns:
         Tuple of (validated DataFrame, list of validation errors)
         
     Raises:
-        DataValidationError: If validation fails and raise_exceptions is True
+        DataValidationError: If validation fails and raise_exception is True
+        
+    Example:
+        ```python
+        # Validate with exception
+        df, _ = validate_dataframe(
+            df,
+            required_columns=['timestamp', 'close', 'volume'],
+            dtypes={'timestamp': 'datetime64[ns]', 'close': 'float64'},
+            min_rows=100,
+            check_index_type=pd.DatetimeIndex,
+            check_sorted_index=True
+        )
+        
+        # Validate without exception
+        df, errors = validate_dataframe(
+            df,
+            required_columns=['timestamp', 'close', 'volume'],
+            raise_exception=False
+        )
+        if errors:
+            logger.warning(f"Validation issues: {errors}")
+        ```
     """
-    errors = []
-    
     # Basic DataFrame validation
-    if not isinstance(df, pd.DataFrame):
-        errors.append(f"Input must be a pandas DataFrame, got {type(df).__name__}")
-        if raise_exceptions:
-            raise DataValidationError("Invalid DataFrame type", errors=errors)
-        return df, errors
+    try:
+        df = check_dataframe_type(df)
+    except TypeError as e:
+        if raise_exception:
+            raise DataValidationError(str(e))
+        return df, [str(e)]
     
     # Make a copy to avoid modifying the original
     df_copy = df.copy()
+    errors = []
     
     # Check required columns
     if required_columns:
-        missing_columns = [col for col in required_columns if col not in df_copy.columns]
-        if missing_columns:
-            errors.append(f"Missing required columns: {', '.join(missing_columns)}")
+        _, missing = validate_columns_exist(df_copy, required_columns, raise_error=False)
+        if missing:
+            errors.append(f"Missing required columns: {', '.join(missing)}")
     
     # Check data types
     if dtypes:
@@ -880,9 +1033,12 @@ def validate_dataframe(
                 continue
                 
             # Check if column type matches expected type
-            actual_type = df_copy[col].dtype
-            if not pd.api.types.is_dtype_equal(actual_type, expected_type):
-                errors.append(f"Column '{col}' has incorrect type: expected {expected_type}, got {actual_type}")
+            try:
+                actual_type = df_copy[col].dtype
+                if not pd.api.types.is_dtype_equal(actual_type, expected_type):
+                    errors.append(f"Column '{col}' has incorrect type: expected {expected_type}, got {actual_type}")
+            except Exception as e:
+                errors.append(f"Error checking type for column '{col}': {e}")
     
     # Check number of rows
     if min_rows is not None and len(df_copy) < min_rows:
@@ -933,7 +1089,7 @@ def validate_dataframe(
                 errors.append(f"Column '{col}' contains {neg_count} negative values")
     
     # Raise exception if requested and errors exist
-    if raise_exceptions and errors:
+    if raise_exception and errors:
         raise DataValidationError(
             "DataFrame validation failed",
             data_info={"shape": df_copy.shape, "columns": list(df_copy.columns)},
@@ -943,767 +1099,351 @@ def validate_dataframe(
     return df_copy, errors
 
 
-def validate_time_series(
-    series: pd.Series,
-    min_length: Optional[int] = None,
-    max_length: Optional[int] = None,
-    check_monotonic: bool = True,
-    check_stationarity: bool = False,
-    check_gaps: bool = False,
-    max_gap: Optional[timedelta] = None,
-    raise_exceptions: bool = False
-) -> Tuple[pd.Series, List[str]]:
+#------------------------------------------------------------------------
+# Time Series Validation Functions
+#------------------------------------------------------------------------
+
+def ensure_datetime_index(
+    df: pd.DataFrame, 
+    datetime_col: Optional[str] = None,
+    infer_from_columns: bool = True,
+    inplace: bool = False
+) -> pd.DataFrame:
     """
-    Validate a time series for common problems.
+    Ensure DataFrame has DatetimeIndex, converting if necessary.
     
     Args:
-        series: Time series to validate
-        min_length: Minimum length of the series
-        max_length: Maximum length of the series
-        check_monotonic: Whether to check if values are monotonically increasing/decreasing
-        check_stationarity: Whether to check if series is stationary (requires statsmodels)
-        check_gaps: Whether to check for gaps in the time index
-        max_gap: Maximum allowed gap between observations
-        raise_exceptions: Whether to raise exceptions on validation errors
+        df: DataFrame to validate
+        datetime_col: Column name to use for datetime index
+        infer_from_columns: Whether to try finding datetime columns
+        inplace: Whether to modify the DataFrame in place
         
     Returns:
-        Tuple of (validated series, list of validation errors)
+        DataFrame with datetime index
         
     Raises:
-        DataValidationError: If validation fails and raise_exceptions is True
+        ValueError: If cannot create datetime index
+        
+    Example:
+        ```python
+        # Using specified column
+        df = ensure_datetime_index(df, datetime_col='timestamp')
+        
+        # Automatic detection
+        df = ensure_datetime_index(df)
+        ```
     """
+    result = df if inplace else df.copy()
+    
+    # Already has DatetimeIndex
+    if isinstance(result.index, pd.DatetimeIndex):
+        return result
+        
+    # Use specified column
+    if datetime_col is not None:
+        if datetime_col not in result.columns:
+            raise ValueError(f"Datetime column '{datetime_col}' not found in DataFrame")
+        
+        result[datetime_col] = pd.to_datetime(result[datetime_col])
+        return result.set_index(datetime_col)
+        
+    # Try to infer from columns if allowed
+    if infer_from_columns:
+        # First, try common datetime column names
+        common_names = ['timestamp', 'time', 'date', 'datetime']
+        for col in common_names:
+            if col in result.columns:
+                result[col] = pd.to_datetime(result[col])
+                return result.set_index(col)
+        
+        # Next, try columns with datetime-like names
+        time_cols = [col for col in result.columns 
+                    if any(kw in col.lower() for kw in ['time', 'date', 'dt', 'timestamp'])]
+        if time_cols:
+            col = time_cols[0]
+            result[col] = pd.to_datetime(result[col])
+            return result.set_index(col)
+    
+    # Try to convert existing index
+    try:
+        result.index = pd.to_datetime(result.index)
+        return result
+    except:
+        raise ValueError(
+            "Could not create DatetimeIndex. Please provide a valid datetime column "
+            "or ensure the index is convertible to datetime."
+        )
+
+
+def validate_time_index_properties(
+    df: pd.DataFrame,
+    min_points: Optional[int] = None,
+    max_gaps: Optional[int] = None,
+    max_gap_size: Optional[timedelta] = None,
+    freq: Optional[str] = None
+) -> Tuple[bool, List[str]]:
+    """
+    Validate properties of a DatetimeIndex.
+    
+    Args:
+        df: DataFrame to validate
+        min_points: Minimum number of data points required
+        max_gaps: Maximum number of gaps allowed
+        max_gap_size: Maximum size of time gaps allowed
+        freq: Expected frequency of the time series
+        
+    Returns:
+        Tuple of (success flag, list of validation errors)
+        
+    Example:
+        ```python
+        # Basic validation
+        is_valid, errors = validate_time_index_properties(
+            df, 
+            min_points=100,
+            max_gaps=5,
+            max_gap_size=timedelta(days=1)
+        )
+        
+        if not is_valid:
+            logger.warning(f"Time index issues: {errors}")
+        ```
+    """
+    # Check if index is DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return False, ["Index is not DatetimeIndex"]
+        
     errors = []
     
-    # Basic series validation
-    if not isinstance(series, pd.Series):
-        errors.append(f"Input must be a pandas Series, got {type(series).__name__}")
-        if raise_exceptions:
-            raise DataValidationError("Invalid Series type", errors=errors)
-        return series, errors
-    
-    # Make a copy to avoid modifying the original
-    series_copy = series.copy()
-    
-    # Check series length
-    if min_length is not None and len(series_copy) < min_length:
-        errors.append(f"Series is too short: expected at least {min_length} observations, got {len(series_copy)}")
-    
-    if max_length is not None and len(series_copy) > max_length:
-        errors.append(f"Series is too long: expected at most {max_length} observations, got {len(series_copy)}")
-    
-    # Check for monotonicity
-    if check_monotonic:
-        # Check if series is numeric
-        if not pd.api.types.is_numeric_dtype(series_copy):
-            errors.append("Series must be numeric for monotonicity check")
-        else:
-            is_increasing = series_copy.is_monotonic_increasing
-            is_decreasing = series_copy.is_monotonic_decreasing
-            
-            if not (is_increasing or is_decreasing):
-                # Neither strictly increasing nor decreasing
-                errors.append("Series is not monotonically increasing or decreasing")
-    
-    # Check for stationarity
-    if check_stationarity:
-        try:
-            from statsmodels.tsa.stattools import adfuller
-            
-            # Check if series is numeric
-            if not pd.api.types.is_numeric_dtype(series_copy):
-                errors.append("Series must be numeric for stationarity check")
-            else:
-                # Drop NaN values
-                clean_series = series_copy.dropna()
-                
-                if len(clean_series) < 20:  # Need enough data for meaningful test
-                    errors.append("Not enough data for stationarity test")
-                else:
-                    # Run Augmented Dickey-Fuller test
-                    adf_result = adfuller(clean_series)
-                    p_value = adf_result[1]
-                    
-                    if p_value > 0.05:
-                        errors.append(f"Series is not stationary (ADF p-value: {p_value:.4f})")
-        except ImportError:
-            errors.append("statsmodels required for stationarity check")
-    
-    # Check for time index
-    is_datetime_index = isinstance(series_copy.index, pd.DatetimeIndex)
-    
-    # Check for gaps in time series
-    if check_gaps and is_datetime_index:
-        # Check for gaps in time index
-        idx = series_copy.index
-        gaps = []
+    # Validate size
+    if min_points is not None and len(df) < min_points:
+        errors.append(f"Time series has {len(df)} points, minimum required is {min_points}")
         
-        # Calculate differences between consecutive timestamps
-        if len(idx) > 1:
+    # Check for gaps
+    if max_gaps is not None or max_gap_size is not None:
+        if len(df) > 1:
+            # Calculate time differences
+            idx = df.index
             diffs = idx[1:] - idx[:-1]
             
-            # Find the most common difference as expected frequency
-            if not max_gap:
-                # Use 2x the median difference as the threshold
-                median_diff = pd.Series(diffs).median()
-                max_gap = median_diff * 2
-            
-            # Find gaps larger than max_gap
-            large_diffs = [(i, diff) for i, diff in enumerate(diffs) if diff > max_gap]
-            
-            if large_diffs:
-                for i, diff in large_diffs:
-                    start_time = idx[i]
-                    end_time = idx[i + 1]
-                    gaps.append(f"{start_time} to {end_time} ({diff})")
+            if max_gap_size is not None:
+                large_gaps = diffs > max_gap_size
+                gap_count = large_gaps.sum()
+                gap_positions = np.where(large_gaps)[0]
                 
-                if len(gaps) > 3:
-                    # Too many gaps to list them all
-                    errors.append(f"Found {len(gaps)} time gaps larger than {max_gap}. First few: {', '.join(gaps[:3])}")
-                else:
-                    errors.append(f"Found time gaps: {', '.join(gaps)}")
-    elif check_gaps and not is_datetime_index:
-        errors.append("Series must have DatetimeIndex for gap checking")
-    
-    # Raise exception if requested and errors exist
-    if raise_exceptions and errors:
-        raise DataValidationError(
-            "Time series validation failed",
-            data_info={"length": len(series_copy), "dtype": str(series_copy.dtype)},
-            errors=errors
-        )
-    
-    return series_copy, errors
-
-
-def validate_missing_data(
-    df: pd.DataFrame,
-    threshold: float = 0.1,
-    columns: Optional[List[str]] = None,
-    drop_columns: bool = False,
-    fill_method: Optional[str] = None,
-    raise_exceptions: bool = False
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """
-    Validate and handle missing data in a DataFrame.
-    
-    Args:
-        df: DataFrame to validate
-        threshold: Maximum allowed proportion of missing data
-        columns: Columns to check (None for all columns)
-        drop_columns: Whether to drop columns with too many missing values
-        fill_method: Method to fill missing values ('ffill', 'bfill', 'mean', etc.)
-        raise_exceptions: Whether to raise exceptions on validation errors
-        
-    Returns:
-        Tuple of (validated DataFrame, dictionary of missing data proportions)
-        
-    Raises:
-        DataValidationError: If validation fails and raise_exceptions is True
-    """
-    # Make a copy to avoid modifying the original
-    df_copy = df.copy()
-    
-    # Determine columns to check
-    check_columns = columns or df_copy.columns
-    
-    # Calculate missing data proportions
-    missing_props = {}
-    for col in check_columns:
-        if col in df_copy.columns:
-            missing_props[col] = df_copy[col].isna().mean()
-    
-    # Find columns with too many missing values
-    high_missing_cols = {col: prop for col, prop in missing_props.items() if prop > threshold}
-    
-    # Handle columns with too many missing values
-    if high_missing_cols:
-        if drop_columns:
-            df_copy = df_copy.drop(columns=list(high_missing_cols.keys()))
-            
-            # Update missing_props after dropping columns
-            missing_props = {col: prop for col, prop in missing_props.items() if col not in high_missing_cols}
-        elif fill_method:
-            # Fill missing values
-            if fill_method == 'ffill':
-                df_copy = df_copy.ffill()
-            elif fill_method == 'bfill':
-                df_copy = df_copy.bfill()
-            elif fill_method == 'mean':
-                for col in high_missing_cols:
-                    if pd.api.types.is_numeric_dtype(df_copy[col]):
-                        df_copy[col] = df_copy[col].fillna(df_copy[col].mean())
-            elif fill_method == 'median':
-                for col in high_missing_cols:
-                    if pd.api.types.is_numeric_dtype(df_copy[col]):
-                        df_copy[col] = df_copy[col].fillna(df_copy[col].median())
-            elif fill_method == 'mode':
-                for col in high_missing_cols:
-                    df_copy[col] = df_copy[col].fillna(df_copy[col].mode()[0])
-            elif fill_method == 'zero':
-                for col in high_missing_cols:
-                    df_copy[col] = df_copy[col].fillna(0)
-            else:
-                warnings.warn(f"Unknown fill method: {fill_method}")
-        
-        # Raise exception if requested
-        if raise_exceptions:
-            errors = [f"Column '{col}' has {prop*100:.1f}% missing values (threshold: {threshold*100:.1f}%)" 
-                     for col, prop in high_missing_cols.items()]
-            
-            raise DataValidationError(
-                "Too many missing values",
-                data_info={"total_rows": len(df_copy), "missing_columns": len(high_missing_cols)},
-                errors=errors
-            )
-    
-    return df_copy, missing_props
-
-
-def validate_data_range(
-    df: pd.DataFrame,
-    column_ranges: Dict[str, Tuple[float, float]],
-    handle_outliers: str = 'none',
-    raise_exceptions: bool = False
-) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """
-    Validate that data falls within specified ranges.
-    
-    Args:
-        df: DataFrame to validate
-        column_ranges: Dictionary mapping columns to (min, max) ranges
-        handle_outliers: How to handle outliers ('none', 'clip', 'remove', 'nan')
-        raise_exceptions: Whether to raise exceptions on validation errors
-        
-    Returns:
-        Tuple of (validated DataFrame, dictionary of outlier counts)
-        
-    Raises:
-        DataValidationError: If validation fails and raise_exceptions is True
-    """
-    # Make a copy to avoid modifying the original
-    df_copy = df.copy()
-    
-    # Count outliers for each column
-    outlier_counts = {}
-    errors = []
-    
-    for col, (min_val, max_val) in column_ranges.items():
-        if col not in df_copy.columns:
-            errors.append(f"Column '{col}' not found in DataFrame")
-            continue
-        
-        # Count outliers
-        below_min = (df_copy[col] < min_val).sum()
-        above_max = (df_copy[col] > max_val).sum()
-        outlier_counts[col] = below_min + above_max
-        
-        if outlier_counts[col] > 0:
-            errors.append(f"Column '{col}' has {outlier_counts[col]} values outside range [{min_val}, {max_val}]")
-            
-            # Handle outliers
-            if handle_outliers == 'clip':
-                df_copy[col] = df_copy[col].clip(min_val, max_val)
-            elif handle_outliers == 'remove':
-                outlier_mask = (df_copy[col] < min_val) | (df_copy[col] > max_val)
-                df_copy = df_copy[~outlier_mask]
-            elif handle_outliers == 'nan':
-                outlier_mask = (df_copy[col] < min_val) | (df_copy[col] > max_val)
-                df_copy.loc[outlier_mask, col] = np.nan
-    
-    # Raise exception if requested and errors exist
-    if raise_exceptions and errors:
-        raise DataValidationError(
-            "Data range validation failed",
-            data_info={"total_rows": len(df), "outlier_columns": len(outlier_counts)},
-            errors=errors
-        )
-    
-    return df_copy, outlier_counts
-
-
-#------------------------------------------------------------------------
-# Signal Validation Functions
-#------------------------------------------------------------------------
-
-def validate_signals(
-    signals: Union[pd.DataFrame, List[Dict]],
-    expected_columns: Optional[List[str]] = None,
-    min_signals: Optional[int] = None,
-    max_signals: Optional[int] = None,
-    check_timestamp_order: bool = True,
-    check_signal_values: bool = False,
-    allowed_signal_values: Optional[List[Any]] = None,
-    as_dataframe: bool = True,
-    raise_exceptions: bool = False
-) -> Union[pd.DataFrame, List[Dict]]:
-    """
-    Validate signals for consistency and expected format.
-    
-    Args:
-        signals: Signals as DataFrame or list of dictionaries
-        expected_columns: List of expected columns/keys
-        min_signals: Minimum number of signals
-        max_signals: Maximum number of signals
-        check_timestamp_order: Whether to check if timestamps are in order
-        check_signal_values: Whether to check signal values against allowed values
-        allowed_signal_values: List of allowed signal values
-        as_dataframe: Whether to return signals as DataFrame
-        raise_exceptions: Whether to raise exceptions on validation errors
-        
-    Returns:
-        Validated signals (as DataFrame or list)
-        
-    Raises:
-        ValidationError: If validation fails and raise_exceptions is True
-    """
-    errors = []
-    
-    # Convert to DataFrame if necessary
-    if isinstance(signals, list):
-        if not signals:
-            signals_df = pd.DataFrame()
-        else:
-            signals_df = pd.DataFrame(signals)
-    elif isinstance(signals, pd.DataFrame):
-        signals_df = signals.copy()
-    else:
-        errors.append(f"Signals must be a DataFrame or list of dictionaries, got {type(signals).__name__}")
-        if raise_exceptions:
-            raise ValidationError("\n".join(errors), source="signal_validation")
-        # Return empty
-        return pd.DataFrame() if as_dataframe else []
-    
-    # Check if DataFrame is empty
-    if signals_df.empty:
-        if min_signals is not None and min_signals > 0:
-            errors.append(f"No signals found, expected at least {min_signals}")
-        
-        # Return empty
-        return signals_df if as_dataframe else []
-    
-    # Check expected columns
-    if expected_columns:
-        missing_columns = [col for col in expected_columns if col not in signals_df.columns]
-        if missing_columns:
-            errors.append(f"Missing expected columns: {', '.join(missing_columns)}")
-    
-    # Check number of signals
-    if min_signals is not None and len(signals_df) < min_signals:
-        errors.append(f"Too few signals: expected at least {min_signals}, got {len(signals_df)}")
-    
-    if max_signals is not None and len(signals_df) > max_signals:
-        errors.append(f"Too many signals: expected at most {max_signals}, got {len(signals_df)}")
-    
-    # Check timestamp order
-    if check_timestamp_order and 'timestamp' in signals_df.columns:
-        # Convert to datetime if not already
-        if not pd.api.types.is_datetime64_dtype(signals_df['timestamp']):
-            try:
-                signals_df['timestamp'] = pd.to_datetime(signals_df['timestamp'])
-            except Exception as e:
-                errors.append(f"Could not convert timestamp column to datetime: {e}")
-        
-        # Check if timestamps are in order
-        if not signals_df['timestamp'].is_monotonic_increasing:
-            errors.append("Timestamps are not in ascending order")
-    
-    # Check signal values
-    if check_signal_values and 'signal' in signals_df.columns:
-        if allowed_signal_values:
-            invalid_values = signals_df[~signals_df['signal'].isin(allowed_signal_values)]['signal'].unique()
-            if len(invalid_values) > 0:
-                errors.append(f"Invalid signal values: {invalid_values}. Allowed values: {allowed_signal_values}")
-    
-    # Raise exception if requested and errors exist
-    if raise_exceptions and errors:
-        raise ValidationError(
-            "Signal validation failed: " + "\n".join(errors),
-            source="signal_validation"
-        )
-    
-    if as_dataframe:
-        return signals_df
-    else:
-        return signals_df.to_dict('records')
-
-
-class SignalSchema(BaseModel):
-    """
-    Schema for validating signal objects.
-    
-    This class defines the expected structure and constraints for
-    signal objects used throughout the analytics engine.
-    """
-    timestamp: datetime
-    signal_type: str
-    value: float
-    source: Optional[str] = None
-    confidence: Optional[float] = None
-    metadata: Optional[Dict[str, Any]] = None
-    
-    class Config:
-        """Configuration for schema validation."""
-        extra = "forbid"  # Forbid extra fields
-    
-    @validator('confidence')
-    def check_confidence(cls, v):
-        """Validate confidence score."""
-        if v is not None and (v < 0 or v > 1):
-            raise ValueError("Confidence score must be between 0 and 1")
-        return v
-
-
-def validate_signal_objects(
-    signals: List[Any],
-    strict: bool = True,
-    coerce: bool = False,
-    raise_exceptions: bool = False
-) -> Tuple[List[Any], List[str]]:
-    """
-    Validate a list of signal objects against the signal schema.
-    
-    Args:
-        signals: List of signal objects to validate
-        strict: Whether to use strict validation
-        coerce: Whether to try to coerce values to the expected types
-        raise_exceptions: Whether to raise exceptions on validation errors
-        
-    Returns:
-        Tuple of (validated signals, list of validation errors)
-        
-    Raises:
-        SchemaValidationError: If validation fails and raise_exceptions is True
-    """
-    errors = []
-    validated_signals = []
-    
-    # Validate each signal
-    for i, signal in enumerate(signals):
-        try:
-            # Convert to dict if it's not already
-            if hasattr(signal, "__dict__"):
-                signal_dict = signal.__dict__
-            elif hasattr(signal, "to_dict"):
-                signal_dict = signal.to_dict()
-            elif isinstance(signal, dict):
-                signal_dict = signal
-            else:
-                errors.append(f"Signal {i} has invalid type: {type(signal).__name__}")
-                continue
-            
-            # Validate against schema
-            validated = SignalSchema(**signal_dict)
-            validated_signals.append(validated)
-        
-        except PydanticValidationError as e:
-            # Extract error details
-            error_dict = e.errors()
-            error_messages = [f"{'.'.join(err['loc'])}: {err['msg']}" for err in error_dict]
-            
-            # Add to errors list
-            errors.append(f"Signal {i} failed validation: {'; '.join(error_messages)}")
-            
-            # Try to fix errors if coercion is enabled
-            if coerce:
-                try:
-                    coerced_dict = signal_dict.copy()
-                    
-                    # Try to coerce common fields
-                    if 'timestamp' in coerced_dict and not isinstance(coerced_dict['timestamp'], datetime):
-                        coerced_dict['timestamp'] = pd.to_datetime(coerced_dict['timestamp'])
-                    
-                    if 'value' in coerced_dict and not isinstance(coerced_dict['value'], (int, float)):
-                        coerced_dict['value'] = float(coerced_dict['value'])
-                    
-                    if 'confidence' in coerced_dict and coerced_dict['confidence'] is not None:
-                        if not isinstance(coerced_dict['confidence'], (int, float)):
-                            coerced_dict['confidence'] = float(coerced_dict['confidence'])
+                if gap_count > 0:
+                    if max_gaps is not None and gap_count > max_gaps:
+                        # List some of the gaps
+                        gap_examples = []
+                        for i in gap_positions[:min(3, len(gap_positions))]:
+                            start_time = idx[i]
+                            end_time = idx[i + 1]
+                            gap_examples.append(f"{start_time} to {end_time} ({diffs[i]})")
                         
-                        # Clip confidence to [0, 1]
-                        coerced_dict['confidence'] = max(0, min(1, coerced_dict['confidence']))
-                    
-                    # Try validation again with coerced values
-                    validated = SignalSchema(**coerced_dict)
-                    validated_signals.append(validated)
-                    
-                    # Replace the error message with a warning
-                    errors[-1] = f"Signal {i} needed coercion: {'; '.join(error_messages)}"
-                
-                except Exception as coerce_error:
-                    # Coercion failed
-                    errors[-1] += f" (coercion failed: {coerce_error})"
+                        errors.append(
+                            f"Found {gap_count} gaps larger than {max_gap_size}. "
+                            f"Examples: {', '.join(gap_examples)}"
+                        )
     
-    # Raise exception if requested and errors exist
-    if raise_exceptions and (errors and strict):
-        raise SchemaValidationError(
-            "Signal validation failed",
-            schema_errors={i: error for i, error in enumerate(errors)}
-        )
+    # Check frequency if specified
+    if freq is not None:
+        # Try to infer frequency
+        inferred_freq = pd.infer_freq(df.index)
+        
+        if inferred_freq != freq:
+            errors.append(f"Index frequency is {inferred_freq}, expected {freq}")
     
-    return validated_signals, errors
+    return len(errors) == 0, errors
 
 
-#------------------------------------------------------------------------
-# Validation Context Managers and Decorators
-#------------------------------------------------------------------------
-
-@contextmanager
-def validation_context(
-    context_name: str,
-    raise_exceptions: bool = True,
-    log_errors: bool = True
-):
+def detect_time_series_frequency(df: pd.DataFrame) -> Optional[str]:
     """
-    Context manager for validation operations.
+    Detect the frequency of time series data.
     
     Args:
-        context_name: Name of the validation context
-        raise_exceptions: Whether to raise exceptions on validation errors
-        log_errors: Whether to log validation errors
+        df: DataFrame with datetime index
         
-    Yields:
-        List to collect validation errors
+    Returns:
+        Detected frequency as pandas frequency string or None if can't be detected
         
     Raises:
-        ValidationError: If validation fails and raise_exceptions is True
-    """
-    errors = []
-    
-    try:
-        yield errors
-    except Exception as e:
-        # Add the exception to the errors list
-        errors.append(f"Exception: {str(e)}")
-        
-        # Re-raise exception if requested
-        if raise_exceptions:
-            raise
-    finally:
-        # Log errors if requested
-        if log_errors and errors:
-            for error in errors:
-                logger.warning(f"Validation error in {context_name}: {error}")
-            
-        # Raise ValidationError if requested and errors exist
-        if raise_exceptions and errors:
-            raise ValidationError(
-                f"Validation failed in {context_name}", 
-                source=context_name
-            )
-
-
-def validate_inputs(
-    **validators: Dict[str, Callable]
-):
-    """
-    Decorator to validate function inputs.
-    
-    Args:
-        **validators: Dictionary mapping parameter names to validator functions
-        
-    Returns:
-        Decorated function
+        TypeError: If DataFrame doesn't have a datetime index
         
     Example:
-        @validate_inputs(
-            window=lambda x: validate_numeric_param(x, "window", min_value=1),
-            method=lambda x: validate_string_param(x, "method", allowed_values=["mean", "median"])
-        )
-        def calculate_statistic(data, window, method="mean"):
-            # Function body
+        ```python
+        # Detect frequency
+        freq = detect_time_series_frequency(df)
+        print(f"Detected frequency: {freq}")
+        ```
     """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Get function signature
-            sig = inspect.signature(func)
-            
-            # Bind arguments to parameters
-            bound_args = sig.bind(*args, **kwargs)
-            bound_args.apply_defaults()
-            
-            # Validate parameters
-            for param_name, validator in validators.items():
-                if param_name in bound_args.arguments:
-                    # Get the argument value
-                    value = bound_args.arguments[param_name]
-                    
-                    # Apply the validator
-                    try:
-                        validated_value = validator(value)
-                        
-                        # Update the argument with the validated value
-                        bound_args.arguments[param_name] = validated_value
-                    
-                    except ValidationError as e:
-                        # Add function name to error
-                        e.source = f"{func.__name__}"
-                        raise e
-            
-            # Call the function with validated arguments
-            return func(*bound_args.args, **bound_args.kwargs)
-        
-        return wrapper
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame must have a datetime index to detect frequency")
     
-    return decorator
+    # Try pandas infer_freq first
+    freq = pd.infer_freq(df.index)
+    
+    if freq is not None:
+        return freq
+        
+    # Calculate time deltas and get the most common
+    if len(df) > 1:
+        # Get time differences
+        time_diffs = df.index[1:] - df.index[:-1]
+        
+        if len(time_diffs) > 0:
+            # Find the most common difference
+            most_common_diff = pd.Series(time_diffs).value_counts().index[0]
+            
+            # Convert to pandas frequency string (approximate)
+            seconds = most_common_diff.total_seconds()
+            
+            if seconds < 60:
+                return f"{int(seconds)}S"
+            elif seconds < 3600:
+                minutes = int(seconds / 60)
+                return f"{minutes}T"
+            elif seconds < 86400:
+                hours = int(seconds / 3600)
+                return f"{hours}H"
+            elif 86400 <= seconds < 604800:
+                days = int(seconds / 86400)
+                return f"{days}D"
+            elif 604800 <= seconds < 2592000:
+                weeks = int(seconds / 604800)
+                return f"{weeks}W"
+            else:
+                months = int(seconds / 2592000)
+                return f"{months}M"
+    
+    # Could not detect frequency
+    return None
 
 
-def validate_return(
-    validator: Callable[[Any], Any],
-    description: str = "return value"
-):
+#------------------------------------------------------------------------
+# Error Collection and Handling
+#------------------------------------------------------------------------
+
+class ValidationErrorCollector:
     """
-    Decorator to validate function return value.
+    Utility class to collect validation errors.
     
-    Args:
-        validator: Function to validate the return value
-        description: Description of the return value for error messages
-        
-    Returns:
-        Decorated function
+    This class provides a convenient way to collect validation errors
+    during complex validation processes, and either return them or
+    raise exceptions as needed.
+    
+    Attributes:
+        errors (List[str]): List of collected error messages
+        raise_on_error (bool): Whether to raise exceptions immediately
         
     Example:
-        @validate_return(lambda x: isinstance(x, pd.DataFrame), "DataFrame")
-        def process_data(data):
-            # Function body
+        ```python
+        # Collect errors without raising exceptions
+        collector = ValidationErrorCollector()
+        
+        # Validate multiple aspects of data
+        if len(df) < 100:
+            collector.add_error("Insufficient data: needs at least 100 rows")
+            
+        if 'timestamp' not in df.columns:
+            collector.add_error("Missing required column: 'timestamp'")
+            
+        # Check if we have any errors
+        if collector.has_errors():
+            logger.warning(f"Validation failed: {collector.get_error_message()}")
+            return None
+            
+        # Continue with valid data
+        return process_data(df)
+        ```
     """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Call the function
-            result = func(*args, **kwargs)
-            
-            # Validate the return value
-            try:
-                if not validator(result):
-                    raise ValidationError(
-                        f"Invalid {description} from {func.__name__}",
-                        source=f"{func.__name__}"
-                    )
-            except Exception as e:
-                if not isinstance(e, ValidationError):
-                    e = ValidationError(
-                        f"Error validating {description} from {func.__name__}: {e}",
-                        source=f"{func.__name__}"
-                    )
-                raise e
-            
-            return result
-        
-        return wrapper
     
-    return decorator
-
-
-def schema_validator(
-    schema_model: Type[BaseModel],
-    context_name: str = "schema validation"
-):
-    """
-    Decorator to validate data against a pydantic schema.
-    
-    Args:
-        schema_model: Pydantic model class to validate against
-        context_name: Name of the validation context
+    def __init__(self, raise_on_error: bool = False):
+        """
+        Initialize the error collector.
         
-    Returns:
-        Decorated function
+        Args:
+            raise_on_error: Whether to raise exceptions immediately when errors are added
+        """
+        self.errors = []
+        self.raise_on_error = raise_on_error
         
-    Example:
-        @schema_validator(UserSchema)
-        def process_user(user_data: Dict):
-            # Function body
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Get function signature
-            sig = inspect.signature(func)
-            
-            # Find the parameter to validate (assume first param of matching type)
-            param_to_validate = None
-            param_name = None
-            
-            for name, param in sig.parameters.items():
-                if param.annotation == Dict or param.annotation == dict:
-                    param_to_validate = name
-                    param_name = name
-                    break
-            
-            # If no parameter found, just call the function
-            if param_to_validate is None:
-                return func(*args, **kwargs)
-            
-            # Get the argument to validate
-            arg_dict = None
-            if param_to_validate < len(args):
-                arg_dict = args[param_to_validate]
-            elif param_name in kwargs:
-                arg_dict = kwargs[param_name]
-            
-            # If no argument found, just call the function
-            if arg_dict is None:
-                return func(*args, **kwargs)
-            
-            # Validate the argument against the schema
-            try:
-                validated = schema_model(**arg_dict)
-                
-                # Update the argument with the validated object
-                if param_to_validate < len(args):
-                    args_list = list(args)
-                    args_list[param_to_validate] = validated.dict()
-                    args = tuple(args_list)
-                else:
-                    kwargs[param_name] = validated.dict()
-                
-            except PydanticValidationError as e:
-                # Extract error details
-                error_dict = e.errors()
-                schema_errors = {'.'.join(err['loc']): err['msg'] for err in error_dict}
-                
-                raise SchemaValidationError(
-                    f"Schema validation failed in {context_name}",
-                    schema_errors=schema_errors
-                )
-            
-            # Call the function with validated arguments
-            return func(*args, **kwargs)
+    def add_error(self, message: str):
+        """
+        Add an error message to the collection.
         
-        return wrapper
-    
-    return decorator
-
-
-def safe_validation(
-    default_value: Any = None,
-    log_errors: bool = True
-):
-    """
-    Decorator to catch and handle validation errors.
-    
-    Args:
-        default_value: Value to return if validation fails
-        log_errors: Whether to log validation errors
+        Args:
+            message: Error message to add
+            
+        Raises:
+            ValidationError: If raise_on_error is True
+        """
+        self.errors.append(message)
         
-    Returns:
-        Decorated function
+        if self.raise_on_error:
+            raise ValidationError(message)
+            
+    def add_errors(self, errors: List[str]):
+        """
+        Add multiple error messages.
         
-    Example:
-        @safe_validation(default_value=[])
-        def process_data(data):
-            # Function that may raise ValidationError
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except ValidationError as e:
-                if log_errors:
-                    logger.warning(f"Validation error in {func.__name__}: {e}")
-                return default_value
+        Args:
+            errors: List of error messages to add
+            
+        Raises:
+            ValidationError: If raise_on_error is True and errors list is not empty
+        """
+        if not errors:
+            return
+            
+        self.errors.extend(errors)
         
-        return wrapper
-    
-    return decorator
+        if self.raise_on_error:
+            raise ValidationError("\n".join(errors))
+            
+    def has_errors(self) -> bool:
+        """
+        Check if any errors were collected.
+        
+        Returns:
+            True if errors were collected, False otherwise
+        """
+        return len(self.errors) > 0
+        
+    def raise_if_errors(self, error_class: Type[Exception] = ValidationError):
+        """
+        Raise an exception if errors were collected.
+        
+        Args:
+            error_class: Exception class to raise
+            
+        Raises:
+            Exception: Of the specified class if errors were collected
+        """
+        if self.has_errors():
+            raise error_class("\n".join(self.errors))
+            
+    def get_error_message(self, separator: str = "\n") -> str:
+        """
+        Get combined error message.
+        
+        Args:
+            separator: String to use for joining error messages
+            
+        Returns:
+            Combined error message
+        """
+        return separator.join(self.errors)
+        
+    def reset(self):
+        """Reset the error collection."""
+        self.errors = []
+        
+    def __bool__(self) -> bool:
+        """Boolean conversion returns True if no errors."""
+        return not self.has_errors()
+        
+    def __str__(self) -> str:
+        """String representation shows errors or success message."""
+        if self.has_errors():
+            return f"Validation errors ({len(self.errors)}): {self.get_error_message()}"
+        return "Validation successful (no errors)"
