@@ -1,140 +1,38 @@
 """
-Analytics Engine Base Class
+Signal Generator Base Class
 
 This module defines the abstract base class for all signal generators in the analytics
-engine. It provides standardized interfaces, parameter validation, logging, and 
-output formatting to ensure consistency across different analytics modules.
+engine. It provides the core interface and implementation for signal generation.
 
 Features:
-    - Standardized parameter validation using Pydantic
-    - Unified signal generation interface
-    - Consistent logging and error handling
-    - Flexible output formats (DataFrame or Signal objects)
-    - Built-in performance tracking
-    - Registry pattern for signal generator discovery
-
-Usage:
-    All signal generators in the analytics engine should inherit from the 
-    SignalGenerator base class and implement its abstract methods.
-
-Example:
-    ```python
-    from quant_research.analytics.base import SignalGenerator, SignalGeneratorParams
-
-    class MyParams(SignalGeneratorParams):
-        window: int = Field(20, gt=0, description="Analysis window size")
-        threshold: float = Field(1.5, description="Signal threshold")
-
-    class MySignalGenerator(SignalGenerator):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self.params = self.validate_params(MyParams, kwargs)
-            
-        def _generate(self, df: pd.DataFrame) -> pd.DataFrame:
-            # Implementation of signal generation logic
-            return signals_df
-    ```
+    - Abstract base class for consistent API
+    - Input validation and preprocessing
+    - Signal generation workflow
+    - Output formatting and processing
+    - Error handling
 """
 
 # Standard library imports
 import logging
 import time
-import warnings
 from abc import ABC, abstractmethod
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union, TypeVar, Generic
+from typing import Any, Dict, List, Optional, Type, Union, TypeVar, Generic
 
 # Third-party imports
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, Field, validator, root_validator
 
 # Local imports
 from quant_research.core.models import Signal
 from quant_research.core.storage import save_to_parquet, save_to_duckdb
+from .signal_params import SignalGeneratorParams
 
 # Type variable for the params
 T = TypeVar('T', bound='SignalGeneratorParams')
 
 # Configure logger for analytics engine
 logger = logging.getLogger("quant_research.analytics")
-
-
-class SignalGeneratorParams(BaseModel):
-    """
-    Base class for signal generator parameters.
-    
-    This class provides a foundation for parameter validation and
-    standardization across different signal generators. All specific
-    parameter classes should inherit from this base class.
-    
-    Attributes:
-        output_file (Optional[str]): Path to save signal output
-        output_format (str): Format for output ('parquet', 'duckdb', or 'both')
-        as_objects (bool): Return Signal objects instead of DataFrame
-        log_level (str): Logging level for this generator
-        name (Optional[str]): Custom name for the signal generator
-    """
-    # Output configuration
-    output_file: Optional[str] = Field(
-        None, 
-        description="Path to save signal output"
-    )
-    output_format: str = Field(
-        "parquet", 
-        description="Format for output ('parquet', 'duckdb', or 'both')"
-    )
-    as_objects: bool = Field(
-        False, 
-        description="Return Signal objects instead of DataFrame"
-    )
-    
-    # Execution configuration
-    log_level: str = Field(
-        "INFO", 
-        description="Logging level for this generator"
-    )
-    name: Optional[str] = Field(
-        None, 
-        description="Custom name for the signal generator"
-    )
-    
-    @validator('output_format')
-    def validate_output_format(cls, v):
-        """Validate that output format is one of the supported formats."""
-        valid_formats = ['parquet', 'duckdb', 'both']
-        if v.lower() not in valid_formats:
-            raise ValueError(f"Output format must be one of {valid_formats}")
-        return v.lower()
-    
-    @validator('log_level')
-    def validate_log_level(cls, v):
-        """Validate that log level is one of the standard logging levels."""
-        valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-        if v.upper() not in valid_levels:
-            raise ValueError(f"Log level must be one of {valid_levels}")
-        return v.upper()
-    
-    @root_validator
-    def validate_output_settings(cls, values):
-        """Validate output settings for consistency between options."""
-        as_objects = values.get('as_objects')
-        output_file = values.get('output_file')
-        
-        if as_objects and output_file:
-            warnings.warn(
-                "Both as_objects and output_file are set. Signals will be "
-                "saved to file and returned as objects."
-            )
-        
-        return values
-    
-    class Config:
-        """Configuration for parameter models."""
-        extra = "forbid"  # Forbid extra fields not defined in the model
-        validate_assignment = True  # Validate fields even after model creation
-        arbitrary_types_allowed = True  # Allow any type for fields
 
 
 class SignalGenerator(Generic[T], ABC):
@@ -454,227 +352,3 @@ class SignalGenerator(Generic[T], ABC):
     def __repr__(self) -> str:
         """String representation of the signal generator."""
         return f"{self.name}(params={self.params})"
-
-
-#------------------------------------------------------------------------
-# Registry Pattern Implementation
-#------------------------------------------------------------------------
-
-class SignalGeneratorRegistry:
-    """
-    Registry for signal generators.
-    
-    This class provides a central registry for signal generators, allowing
-    dynamic loading and creation of generators by name. It implements the
-    registry pattern to decouple generator definition from usage.
-    
-    Usage:
-        # Register a generator
-        SignalGeneratorRegistry.register('volatility', VolatilitySignalGenerator)
-        
-        # Create a generator instance by name
-        volatility_generator = SignalGeneratorRegistry.create('volatility', window=21)
-    """
-    
-    _registry = {}
-    
-    @classmethod
-    def register(cls, name: str, generator_class: Type[SignalGenerator]) -> None:
-        """
-        Register a signal generator class.
-        
-        Args:
-            name: Name to register the generator under
-            generator_class: SignalGenerator class
-            
-        Returns:
-            None
-            
-        Raises:
-            TypeError: If the class does not inherit from SignalGenerator
-        """
-        if not issubclass(generator_class, SignalGenerator):
-            raise TypeError(f"Class {generator_class.__name__} must inherit from SignalGenerator")
-            
-        cls._registry[name] = generator_class
-        logger.debug(f"Registered signal generator: {name}")
-    
-    @classmethod
-    def create(cls, name: str, **kwargs) -> SignalGenerator:
-        """
-        Create a signal generator instance by name.
-        
-        Args:
-            name: Name of the generator to create
-            **kwargs: Parameters to pass to the generator constructor
-            
-        Returns:
-            SignalGenerator instance
-            
-        Raises:
-            ValueError: If the generator name is not registered
-        """
-        if name not in cls._registry:
-            raise ValueError(f"Unknown signal generator: {name}. Available generators: {', '.join(cls._registry.keys())}")
-            
-        generator_class = cls._registry[name]
-        return generator_class(**kwargs)
-    
-    @classmethod
-    def list_generators(cls) -> List[str]:
-        """
-        List all registered generator names.
-        
-        Returns:
-            List of registered generator names
-        """
-        return list(cls._registry.keys())
-    
-    @classmethod
-    def get_info(cls, name: str = None) -> Dict[str, Any]:
-        """
-        Get information about registered generators.
-        
-        Args:
-            name: Optional name of specific generator to get info for
-            
-        Returns:
-            Dictionary with generator information
-            
-        Raises:
-            ValueError: If the specified generator name is not registered
-        """
-        if name is not None:
-            if name not in cls._registry:
-                raise ValueError(f"Unknown signal generator: {name}")
-                
-            generator_class = cls._registry[name]
-            return {
-                "name": name,
-                "class": generator_class.__name__,
-                "module": generator_class.__module__,
-                "description": generator_class.__doc__.split('\n')[0] if generator_class.__doc__ else "No description"
-            }
-        else:
-            return {
-                name: {
-                    "class": generator_class.__name__,
-                    "module": generator_class.__module__,
-                    "description": generator_class.__doc__.split('\n')[0] if generator_class.__doc__ else "No description"
-                }
-                for name, generator_class in cls._registry.items()
-            }
-
-
-#------------------------------------------------------------------------
-# Pipeline Pattern Implementation
-#------------------------------------------------------------------------
-
-class SignalPipeline:
-    """
-    Pipeline for executing multiple signal generators.
-    
-    This class allows combining multiple signal generators into a processing
-    pipeline that can be executed as a single unit. It implements the pipeline
-    pattern for sequential data processing.
-    
-    Usage:
-        # Create generators
-        vol_gen = VolatilitySignalGenerator(window=21)
-        regime_gen = RegimeDetectorSignalGenerator(n_states=3)
-        
-        # Create pipeline
-        pipeline = SignalPipeline([vol_gen, regime_gen])
-        
-        # Run pipeline
-        results = pipeline.run(data_df)
-    """
-    
-    def __init__(self, generators: List[SignalGenerator]):
-        """
-        Initialize the signal pipeline.
-        
-        Args:
-            generators: List of signal generators to include in the pipeline
-        """
-        self.generators = generators
-        self.logger = logging.getLogger("quant_research.analytics.pipeline")
-    
-    def run(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """
-        Run all signal generators in the pipeline.
-        
-        Executes each signal generator in sequence and collects their results.
-        Errors in individual generators do not stop the pipeline.
-        
-        Args:
-            df: Input DataFrame with market data
-            
-        Returns:
-            Dictionary mapping generator names to signal DataFrames
-        """
-        self.logger.info(f"Running signal pipeline with {len(self.generators)} generators")
-        
-        results = {}
-        start_time = time.time()
-        
-        for generator in self.generators:
-            try:
-                name = generator.name
-                self.logger.info(f"Running generator: {name}")
-                
-                signals = generator.generate_signal(df)
-                
-                # Skip None results
-                if signals is None:
-                    self.logger.warning(f"Generator {name} returned None")
-                    continue
-                    
-                # Convert Signal objects to DataFrame if needed
-                if isinstance(signals, list) and signals and isinstance(signals[0], Signal):
-                    signals_df = pd.DataFrame([s.__dict__ for s in signals])
-                else:
-                    signals_df = signals
-                
-                results[name] = signals_df
-                
-            except Exception as e:
-                self.logger.error(f"Error in generator {generator.name}: {e}", exc_info=True)
-                # Continue with other generators instead of stopping the pipeline
-        
-        elapsed = time.time() - start_time
-        self.logger.info(f"Pipeline completed in {elapsed:.2f} seconds with {len(results)} successful generators")
-        
-        return results
-    
-    def add_generator(self, generator: SignalGenerator) -> None:
-        """
-        Add a signal generator to the pipeline.
-        
-        Args:
-            generator: Signal generator to add
-            
-        Returns:
-            None
-        """
-        self.generators.append(generator)
-        self.logger.debug(f"Added generator {generator.name} to pipeline")
-    
-    def remove_generator(self, name: str) -> bool:
-        """
-        Remove a signal generator from the pipeline by name.
-        
-        Args:
-            name: Name of the generator to remove
-            
-        Returns:
-            True if a generator was removed, False otherwise
-        """
-        initial_count = len(self.generators)
-        self.generators = [g for g in self.generators if g.name != name]
-        removed = len(self.generators) < initial_count
-        
-        if removed:
-            self.logger.debug(f"Removed generator {name} from pipeline")
-        
-        return removed
