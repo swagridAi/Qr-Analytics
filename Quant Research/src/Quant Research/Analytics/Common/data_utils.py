@@ -1,17 +1,55 @@
 """
-Data Utilities Module
+Core Data Utilities
 
-This module provides common data handling utilities used across the quant research package,
-including validation, cleaning, transformation, and feature engineering foundation functions.
+This module provides fundamental data handling utilities for time series analysis.
+It serves as the foundation for all data operations across the library, focusing on:
 
-The utilities focus on preparing financial time series data for analysis, ensuring
-consistent preprocessing approaches and reducing code duplication.
+1. Core DataFrame operations (validation, index handling)
+2. Time series processing (filtering, alignment, resampling)
+3. Financial calculations (returns, metrics)
+4. Data cleaning utilities (outlier detection, normalization)
+
+All other modules (data_prep, features, etc.) should build upon these 
+core utilities rather than reimplementing similar functionality.
+
+Usage:
+    ```python
+    from quant_research.analytics.common.data_utils import (
+        # Core DataFrame operations
+        ensure_datetime_index,
+        validate_ohlc,
+        detect_frequency,
+        
+        # Time series processing
+        filter_time_range,
+        resample_data,
+        align_dataframes,
+        
+        # Financial calculations
+        calculate_returns,
+        calculate_cumulative_returns,
+        calculate_drawdowns,
+        
+        # Data cleaning
+        detect_outliers,
+        normalize_data,
+        calculate_zscore
+    )
+    
+    # Ensure proper DataFrame format
+    df = ensure_datetime_index(df)
+    df = validate_ohlc(df)
+    
+    # Calculate financial metrics
+    df['returns'] = calculate_returns(df['close'])
+    df['vol'] = calculate_volatility(df['returns'])
+    ```
 """
 
 # Standard library imports
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union, Callable, Any
+from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Set
 
 # Third-party imports
 import numpy as np
@@ -22,9 +60,9 @@ from scipy import stats
 # Configure module logger
 logger = logging.getLogger("quant_research.analytics.common.data_utils")
 
-#------------------------------------------------------------------------
-# DataFrame Validation and Preparation
-#------------------------------------------------------------------------
+#========================================================================
+# SECTION 1: CORE DATAFRAME OPERATIONS
+#========================================================================
 
 def ensure_datetime_index(
     df: pd.DataFrame, 
@@ -77,8 +115,8 @@ def ensure_datetime_index(
 
 def validate_ohlc(
     df: pd.DataFrame, 
-    required_cols: List[str] = None,
-    rename_map: Dict[str, str] = None
+    required_cols: Optional[List[str]] = None,
+    rename_map: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
     """
     Validate and standardize OHLC data format.
@@ -147,7 +185,7 @@ def validate_ohlc(
     return df
 
 
-def detect_frequency(df: pd.DataFrame) -> str:
+def detect_frequency(df: pd.DataFrame) -> Optional[str]:
     """
     Detect the frequency of time series data.
     
@@ -155,7 +193,7 @@ def detect_frequency(df: pd.DataFrame) -> str:
         df: Input DataFrame with datetime index
         
     Returns:
-        Inferred frequency as pandas frequency string
+        Inferred frequency as pandas frequency string or None if can't be detected
         
     Raises:
         TypeError: If DataFrame doesn't have a datetime index
@@ -198,10 +236,96 @@ def detect_frequency(df: pd.DataFrame) -> str:
     return None
 
 
+def validate_missing_data(
+    df: pd.DataFrame,
+    threshold: float = 0.1,
+    columns: Optional[List[str]] = None,
+    drop_columns: bool = False,
+    fill_method: Optional[str] = None,
+    raise_exceptions: bool = False
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """
+    Validate and handle missing data in a DataFrame.
+    
+    Args:
+        df: DataFrame to validate
+        threshold: Maximum allowed proportion of missing data
+        columns: Columns to check (None for all columns)
+        drop_columns: Whether to drop columns with too many missing values
+        fill_method: Method to fill missing values ('ffill', 'bfill', 'mean', etc.)
+        raise_exceptions: Whether to raise exceptions on validation errors
+        
+    Returns:
+        Tuple of (validated DataFrame, dictionary of missing data proportions)
+        
+    Raises:
+        Exception: If validation fails and raise_exceptions is True
+    """
+    # Make a copy to avoid modifying the original
+    df_copy = df.copy()
+    
+    # Determine columns to check
+    check_columns = columns or df_copy.columns
+    
+    # Calculate missing data proportions
+    missing_props = {}
+    for col in check_columns:
+        if col in df_copy.columns:
+            missing_props[col] = df_copy[col].isna().mean()
+    
+    # Find columns with too many missing values
+    high_missing_cols = {col: prop for col, prop in missing_props.items() if prop > threshold}
+    
+    # Handle columns with too many missing values
+    if high_missing_cols:
+        if drop_columns:
+            df_copy = df_copy.drop(columns=list(high_missing_cols.keys()))
+            
+            # Update missing_props after dropping columns
+            missing_props = {col: prop for col, prop in missing_props.items() if col not in high_missing_cols}
+        elif fill_method:
+            # Fill missing values
+            if fill_method == 'ffill':
+                df_copy = df_copy.ffill()
+            elif fill_method == 'bfill':
+                df_copy = df_copy.bfill()
+            elif fill_method == 'mean':
+                for col in high_missing_cols:
+                    if pd.api.types.is_numeric_dtype(df_copy[col]):
+                        df_copy[col] = df_copy[col].fillna(df_copy[col].mean())
+            elif fill_method == 'median':
+                for col in high_missing_cols:
+                    if pd.api.types.is_numeric_dtype(df_copy[col]):
+                        df_copy[col] = df_copy[col].fillna(df_copy[col].median())
+            elif fill_method == 'mode':
+                for col in high_missing_cols:
+                    df_copy[col] = df_copy[col].fillna(df_copy[col].mode()[0])
+            elif fill_method == 'zero':
+                for col in high_missing_cols:
+                    df_copy[col] = df_copy[col].fillna(0)
+            else:
+                logger.warning(f"Unknown fill method: {fill_method}")
+        
+        # Raise exception if requested
+        if raise_exceptions:
+            errors = [f"Column '{col}' has {prop*100:.1f}% missing values (threshold: {threshold*100:.1f}%)" 
+                     for col, prop in high_missing_cols.items()]
+            
+            raise Exception(
+                f"Too many missing values: {'; '.join(errors)}"
+            )
+    
+    return df_copy, missing_props
+
+
+#========================================================================
+# SECTION 2: TIME SERIES PROCESSING
+#========================================================================
+
 def filter_time_range(
     df: pd.DataFrame,
-    start_date: Union[str, datetime, pd.Timestamp] = None,
-    end_date: Union[str, datetime, pd.Timestamp] = None,
+    start_date: Optional[Union[str, datetime, pd.Timestamp]] = None,
+    end_date: Optional[Union[str, datetime, pd.Timestamp]] = None,
     inclusive: str = 'both'
 ) -> pd.DataFrame:
     """
@@ -263,7 +387,7 @@ def filter_time_range(
 def resample_data(
     df: pd.DataFrame, 
     freq: str,
-    agg_dict: Dict[str, str] = None
+    agg_dict: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
     """
     Resample time series data to a specified frequency.
@@ -317,8 +441,8 @@ def resample_data(
 def align_dataframes(
     dfs: List[pd.DataFrame],
     method: str = 'outer',
-    fill_method: str = None,
-    freq: str = None
+    fill_method: Optional[str] = None,
+    freq: Optional[str] = None
 ) -> List[pd.DataFrame]:
     """
     Align multiple DataFrames to a common time index.
@@ -404,9 +528,9 @@ def align_dataframes(
     return aligned_dfs
 
 
-#------------------------------------------------------------------------
-# Return and Price Calculations
-#------------------------------------------------------------------------
+#========================================================================
+# SECTION 3: FINANCIAL CALCULATIONS
+#========================================================================
 
 def calculate_returns(
     prices: Union[pd.Series, pd.DataFrame],
@@ -602,15 +726,15 @@ def calculate_volatility(
     return vol
 
 
-#------------------------------------------------------------------------
-# Outlier Detection and Handling
-#------------------------------------------------------------------------
+#========================================================================
+# SECTION 4: DATA CLEANING UTILITIES
+#========================================================================
 
 def detect_outliers(
     series: pd.Series,
     method: str = 'zscore',
     threshold: float = 3.0,
-    window: int = None
+    window: Optional[int] = None
 ) -> pd.Series:
     """
     Detect outliers in a time series.
@@ -691,11 +815,11 @@ def detect_outliers(
 
 def handle_outliers(
     df: pd.DataFrame,
-    columns: List[str] = None,
+    columns: Optional[List[str]] = None,
     method: str = 'zscore',
     threshold: float = 3.0,
     treatment: str = 'winsorize',
-    window: int = None
+    window: Optional[int] = None
 ) -> pd.DataFrame:
     """
     Detect and handle outliers in specified columns.
@@ -842,16 +966,12 @@ def handle_outliers(
     return result
 
 
-#------------------------------------------------------------------------
-# Normalization and Scaling
-#------------------------------------------------------------------------
-
 def normalize_data(
     df: pd.DataFrame,
-    columns: List[str] = None,
+    columns: Optional[List[str]] = None,
     method: str = 'standard',
     feature_range: Tuple[float, float] = (0, 1),
-    window: int = None,
+    window: Optional[int] = None,
     output_scaler: bool = False
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, Any]]:
     """
@@ -982,10 +1102,6 @@ def normalize_data(
         return result
 
 
-#------------------------------------------------------------------------
-# Feature Engineering Base Functions
-#------------------------------------------------------------------------
-
 def calculate_zscore(
     series: pd.Series, 
     window: int = 60,
@@ -1059,9 +1175,13 @@ def calculate_zscore(
     return z_score
 
 
+#========================================================================
+# SECTION 5: FEATURE ENGINEERING UTILITIES
+#========================================================================
+
 def add_lagged_features(
     df: pd.DataFrame,
-    columns: List[str] = None,
+    columns: Optional[List[str]] = None,
     lags: List[int] = [1, 5, 10],
     drop_na: bool = False
 ) -> pd.DataFrame:
@@ -1103,7 +1223,7 @@ def add_lagged_features(
 
 def add_difference_features(
     df: pd.DataFrame,
-    columns: List[str] = None,
+    columns: Optional[List[str]] = None,
     periods: List[int] = [1, 5, 10],
     pct_change: bool = False,
     drop_na: bool = False
@@ -1150,9 +1270,9 @@ def add_difference_features(
 
 def add_rolling_features(
     df: pd.DataFrame,
-    columns: List[str] = None,
+    columns: Optional[List[str]] = None,
     windows: List[int] = [5, 10, 20],
-    functions: Dict[str, Callable] = None,
+    functions: Optional[Dict[str, Callable]] = None,
     min_periods: Optional[int] = None,
     drop_na: bool = False
 ) -> pd.DataFrame:
@@ -1211,9 +1331,9 @@ def add_rolling_features(
     return result
 
 
-#------------------------------------------------------------------------
-# Time Series Cross-Validation
-#------------------------------------------------------------------------
+#========================================================================
+# SECTION 6: TIME SERIES CROSS-VALIDATION
+#========================================================================
 
 def time_series_split(
     df: pd.DataFrame,
@@ -1221,7 +1341,7 @@ def time_series_split(
     train_pct: float = 0.8,
     valid_pct: float = 0.1,
     gap: int = 0,
-    min_train_size: int = None
+    min_train_size: Optional[int] = None
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """
     Create time series train/validation/test splits.
@@ -1295,7 +1415,7 @@ def expanding_window_split(
     test_size: float = 0.2,
     valid_size: float = 0.2,
     gap: int = 0,
-    min_train_size: int = None
+    min_train_size: Optional[int] = None
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """
     Create expanding window time series splits (train set grows with each split).
@@ -1360,10 +1480,10 @@ def expanding_window_split(
 def walk_forward_split(
     df: pd.DataFrame,
     n_splits: int = 5,
-    train_size: int = None,
-    test_size: int = None,
-    valid_size: int = None,
-    step_size: int = None,
+    train_size: Optional[int] = None,
+    test_size: Optional[int] = None,
+    valid_size: Optional[int] = None,
+    step_size: Optional[int] = None,
     gap: int = 0
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """
@@ -1434,89 +1554,3 @@ def walk_forward_split(
     logger.info(f"Created {len(splits)} walk-forward splits")
     
     return splits
-
-
-#------------------------------------------------------------------------
-# Data Quality and Missing Values
-#------------------------------------------------------------------------
-
-def validate_missing_data(
-    df: pd.DataFrame,
-    threshold: float = 0.1,
-    columns: Optional[List[str]] = None,
-    drop_columns: bool = False,
-    fill_method: Optional[str] = None,
-    raise_exceptions: bool = False
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """
-    Validate and handle missing data in a DataFrame.
-    
-    Args:
-        df: DataFrame to validate
-        threshold: Maximum allowed proportion of missing data
-        columns: Columns to check (None for all columns)
-        drop_columns: Whether to drop columns with too many missing values
-        fill_method: Method to fill missing values ('ffill', 'bfill', 'mean', etc.)
-        raise_exceptions: Whether to raise exceptions on validation errors
-        
-    Returns:
-        Tuple of (validated DataFrame, dictionary of missing data proportions)
-        
-    Raises:
-        Exception: If validation fails and raise_exceptions is True
-    """
-    # Make a copy to avoid modifying the original
-    df_copy = df.copy()
-    
-    # Determine columns to check
-    check_columns = columns or df_copy.columns
-    
-    # Calculate missing data proportions
-    missing_props = {}
-    for col in check_columns:
-        if col in df_copy.columns:
-            missing_props[col] = df_copy[col].isna().mean()
-    
-    # Find columns with too many missing values
-    high_missing_cols = {col: prop for col, prop in missing_props.items() if prop > threshold}
-    
-    # Handle columns with too many missing values
-    if high_missing_cols:
-        if drop_columns:
-            df_copy = df_copy.drop(columns=list(high_missing_cols.keys()))
-            
-            # Update missing_props after dropping columns
-            missing_props = {col: prop for col, prop in missing_props.items() if col not in high_missing_cols}
-        elif fill_method:
-            # Fill missing values
-            if fill_method == 'ffill':
-                df_copy = df_copy.ffill()
-            elif fill_method == 'bfill':
-                df_copy = df_copy.bfill()
-            elif fill_method == 'mean':
-                for col in high_missing_cols:
-                    if pd.api.types.is_numeric_dtype(df_copy[col]):
-                        df_copy[col] = df_copy[col].fillna(df_copy[col].mean())
-            elif fill_method == 'median':
-                for col in high_missing_cols:
-                    if pd.api.types.is_numeric_dtype(df_copy[col]):
-                        df_copy[col] = df_copy[col].fillna(df_copy[col].median())
-            elif fill_method == 'mode':
-                for col in high_missing_cols:
-                    df_copy[col] = df_copy[col].fillna(df_copy[col].mode()[0])
-            elif fill_method == 'zero':
-                for col in high_missing_cols:
-                    df_copy[col] = df_copy[col].fillna(0)
-            else:
-                logger.warning(f"Unknown fill method: {fill_method}")
-        
-        # Raise exception if requested
-        if raise_exceptions:
-            errors = [f"Column '{col}' has {prop*100:.1f}% missing values (threshold: {threshold*100:.1f}%)" 
-                     for col, prop in high_missing_cols.items()]
-            
-            raise Exception(
-                f"Too many missing values: {'; '.join(errors)}"
-            )
-    
-    return df_copy, missing_props
