@@ -3,7 +3,8 @@ import importlib
 import inspect
 import pkgutil
 import logging
-from typing import Dict, Type, Any, Optional, List, TypeVar
+from functools import wraps
+from typing import Dict, Type, Any, Optional, List, TypeVar, Callable, Set, Union
 
 from ..core.config import ProviderConfig, ProviderType
 from .base import BaseProvider
@@ -14,13 +15,16 @@ T = TypeVar('T', bound=BaseProvider)
 
 
 class ProviderRegistry:
-    """Registry for provider classes"""
+    """Registry for provider classes with decorator-based registration"""
     
     # Map of provider ID to provider class
     _providers: Dict[str, Type[BaseProvider]] = {}
     
     # Map of provider type to list of provider IDs
     _provider_types: Dict[ProviderType, List[str]] = {}
+    
+    # Set of auto-discovered modules to avoid re-processing
+    _discovered_modules: Set[str] = set()
     
     @classmethod
     def register(cls, provider_id: str, provider_class: Type[BaseProvider], 
@@ -81,6 +85,64 @@ class ProviderRegistry:
         """Clear all registered providers (mainly for testing)"""
         cls._providers.clear()
         cls._provider_types.clear()
+        cls._discovered_modules.clear()
+
+
+def register_provider(
+    provider_id: Optional[str] = None, 
+    provider_type: ProviderType = ProviderType.CUSTOM
+) -> Callable:
+    """
+    Decorator to register a provider class
+    
+    Usage:
+        @register_provider("my_provider")
+        class MyProvider(BaseProvider):
+            ...
+    
+    Args:
+        provider_id: Unique identifier for the provider (defaults to class name in snake_case)
+        provider_type: Type category for the provider
+        
+    Returns:
+        Decorator function
+    """
+    def decorator(cls: Type[BaseProvider]) -> Type[BaseProvider]:
+        # Determine provider_id if not provided
+        nonlocal provider_id
+        if provider_id is None:
+            # Convert class name from CamelCase to snake_case
+            name = cls.__name__
+            provider_id = ''.join(['_' + c.lower() if c.isupper() else c for c in name]).lstrip('_')
+            
+            # Remove 'Provider' suffix if present
+            if provider_id.endswith('_provider'):
+                provider_id = provider_id[:-9]
+        
+        # Determine provider type if not explicitly set
+        actual_provider_type = provider_type
+        if provider_type == ProviderType.CUSTOM:
+            # Try to infer from class name or module name
+            module_name = cls.__module__.split('.')[-1]
+            class_name = cls.__name__.lower()
+            
+            for pt in ProviderType:
+                if pt.value in module_name or pt.value in class_name:
+                    actual_provider_type = pt
+                    break
+        
+        # Register the provider
+        ProviderRegistry.register(provider_id, cls, actual_provider_type)
+        
+        return cls
+    
+    # Handle case where decorator is used without parentheses
+    if inspect.isclass(provider_id) and issubclass(provider_id, BaseProvider):
+        cls = provider_id
+        provider_id = None
+        return decorator(cls)
+    
+    return decorator
 
 
 class ProviderFactory:
@@ -105,7 +167,12 @@ class ProviderFactory:
         provider_class = ProviderRegistry.get_provider_class(provider_id)
         
         if not provider_class:
-            raise ValueError(f"Provider '{provider_id}' not registered")
+            # Try automatic discovery first
+            cls.discover_providers()
+            provider_class = ProviderRegistry.get_provider_class(provider_id)
+            
+            if not provider_class:
+                raise ValueError(f"Provider '{provider_id}' not registered")
         
         # Create the provider instance
         return provider_class(config)
@@ -134,6 +201,18 @@ class ProviderFactory:
             if type_providers:
                 provider_id = type_providers[0]
         
+        # If still not found, try discovery
+        if not provider_id:
+            cls.discover_providers()
+            
+            # Try again after discovery
+            if config.name in ProviderRegistry.list_providers():
+                provider_id = config.name
+            elif config.type:
+                type_providers = ProviderRegistry.list_providers_by_type(config.type)
+                if type_providers:
+                    provider_id = type_providers[0]
+        
         if not provider_id:
             raise ValueError(f"Could not find provider for config: {config.name} (type: {config.type})")
         
@@ -150,32 +229,61 @@ class ProviderFactory:
         import quant_research.providers as providers_pkg
         
         count = 0
+        
+        # Get all modules in the providers package
         for _, module_name, is_pkg in pkgutil.iter_modules(providers_pkg.__path__):
-            if not is_pkg and module_name != "base" and not module_name.startswith("_"):
-                try:
-                    module = importlib.import_module(f"quant_research.providers.{module_name}")
-                    
-                    # Look for provider classes in the module
-                    for item_name in dir(module):
-                        item = getattr(module, item_name)
-                        
-                        if (inspect.isclass(item) and 
-                            issubclass(item, BaseProvider) and 
-                            item != BaseProvider):
-                            
-                            # Determine provider type from module name
-                            provider_type = ProviderType.CUSTOM
-                            for pt in ProviderType:
-                                if pt.value in module_name:
-                                    provider_type = pt
-                                    break
-                            
-                            # Register using a standard naming convention
-                            provider_id = module_name
-                            ProviderRegistry.register(provider_id, item, provider_type)
-                            count += 1
+            # Skip packages, base.py, and any modules starting with _
+            if is_pkg or module_name == "base" or module_name.startswith("_"):
+                continue
                 
-                except Exception as e:
-                    logger.error(f"Error discovering providers in {module_name}: {e}")
+            # Skip already discovered modules
+            if module_name in ProviderRegistry._discovered_modules:
+                continue
+            
+            try:
+                # Import the module
+                full_module_name = f"quant_research.providers.{module_name}"
+                module = importlib.import_module(full_module_name)
+                ProviderRegistry._discovered_modules.add(module_name)
+                
+                # Look for provider classes in the module
+                for item_name in dir(module):
+                    item = getattr(module, item_name)
+                    
+                    # Check if it's a provider class and not the base class
+                    if (inspect.isclass(item) and 
+                        issubclass(item, BaseProvider) and 
+                        item != BaseProvider):
+                        
+                        # Skip if already registered through the decorator
+                        is_registered = False
+                        for registered_id, registered_class in ProviderRegistry._providers.items():
+                            if registered_class == item:
+                                is_registered = True
+                                break
+                        
+                        if is_registered:
+                            continue
+                        
+                        # Determine provider type from module name
+                        provider_type = ProviderType.CUSTOM
+                        for pt in ProviderType:
+                            if pt.value in module_name:
+                                provider_type = pt
+                                break
+                        
+                        # Register using module name as provider ID
+                        provider_id = module_name
+                        ProviderRegistry.register(provider_id, item, provider_type)
+                        count += 1
+                
+            except Exception as e:
+                logger.error(f"Error discovering providers in {module_name}: {e}")
         
         return count
+
+
+# For backward compatibility:
+def get_provider(provider_id: str, config: ProviderConfig) -> BaseProvider:
+    """Get a provider instance (backward compatibility function)"""
+    return ProviderFactory.create(provider_id, config)
