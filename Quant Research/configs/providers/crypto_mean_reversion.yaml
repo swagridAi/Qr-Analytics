@@ -1,0 +1,53 @@
+# configs/crypto_mean_reversion.yaml
+# Configuration for crypto mean reversion pipeline
+
+# Data provider settings
+provider:
+  name: crypto_ccxt
+  type: crypto
+  exchange: binance
+  symbols: 
+    - BTC/USDT
+    - ETH/USDT
+  timeframe: 1h
+  api_key: ${CCXT_API_KEY}
+  api_secret: ${CCXT_API_SECRET}
+  rate_limit_requests: 10
+  cache_duration: 60
+
+# Signal generation parameters
+analytics:
+  zscore:
+    window: 60
+    min_periods: 30
+    method: rolling
+    entry_threshold: 2.0
+    exit_threshold: 0.5
+    filter_momentum: true
+    momentum_window: 5
+
+# Backtest parameters
+backtest:
+  strategy: mean_reversion
+  strategy_params:
+    entry_threshold: 2.0
+    exit_threshold: 0.5
+    max_holding_periods: 10
+    max_leverage: 1.0
+    asymmetric_sizing: true
+    stop_loss_pct: 2.0
+  risk_params:
+    max_leverage: 1.0
+    max_position_size: 0.1
+  fee_model: fixed
+  fee_params:
+    commission_pct: 0.001
+    min_commission: 1.0
+  portfolio_initial_value: 1000000
+
+# Pipeline scheduling
+schedule:
+  cron: "0 1 * * *"  # Daily at 1:00 AM
+  timezone: UTC
+  retries: 3
+  retry_delay: 60
