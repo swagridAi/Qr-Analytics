@@ -22,150 +22,20 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+# Local imports - now importing from data_utils
+from quant_research.analytics.common.data_utils import (
+    calculate_returns,
+    calculate_momentum,
+    calculate_volatility,
+    calculate_zscore,
+    add_lagged_features,
+    add_difference_features,
+    add_rolling_features,
+    normalize_data
+)
+
 # Configure logger
 logger = logging.getLogger(__name__)
-
-#------------------------------------------------------------------------
-# Basic Time Series Features
-#------------------------------------------------------------------------
-
-def calculate_returns(
-    prices: Union[pd.Series, pd.DataFrame],
-    method: str = 'log',
-    periods: int = 1,
-    col_name: Optional[str] = None,
-    dropna: bool = False
-) -> Union[pd.Series, pd.DataFrame]:
-    """
-    Calculate returns from price data.
-    
-    Args:
-        prices: Price data (Series or DataFrame)
-        method: Return calculation method ('log', 'pct', 'diff', 'ratio')
-        periods: Number of periods to shift for return calculation
-        col_name: Column name if prices is a DataFrame
-        dropna: Whether to drop NaN values
-        
-    Returns:
-        Series or DataFrame with calculated returns
-        
-    Raises:
-        ValueError: If an invalid method is specified
-    """
-    # Input validation
-    if method not in ['log', 'pct', 'diff', 'ratio']:
-        raise ValueError(f"Invalid return method: {method}. Use 'log', 'pct', 'diff', or 'ratio'")
-    
-    # Extract Series from DataFrame if column specified
-    if isinstance(prices, pd.DataFrame) and col_name is not None:
-        if col_name not in prices.columns:
-            raise ValueError(f"Column '{col_name}' not found in DataFrame")
-        price_data = prices[col_name]
-    else:
-        price_data = prices
-    
-    # Calculate returns based on specified method
-    if method == 'log':
-        returns = np.log(price_data / price_data.shift(periods))
-    elif method == 'pct':
-        returns = price_data.pct_change(periods=periods)
-    elif method == 'diff':
-        returns = price_data.diff(periods=periods)
-    elif method == 'ratio':
-        returns = price_data / price_data.shift(periods)
-    
-    # Drop NaN values if requested
-    if dropna:
-        if isinstance(returns, pd.DataFrame):
-            returns = returns.dropna()
-        else:
-            returns = returns.dropna()
-    
-    return returns
-
-
-def calculate_momentum(
-    prices: Union[pd.Series, pd.DataFrame],
-    window: int = 20,
-    method: str = 'ratio',
-    col_name: Optional[str] = None
-) -> Union[pd.Series, pd.DataFrame]:
-    """
-    Calculate price momentum.
-    
-    Args:
-        prices: Price data (Series or DataFrame)
-        window: Lookback window for momentum calculation
-        method: Calculation method ('ratio', 'diff', 'log')
-        col_name: Column name if prices is a DataFrame
-        
-    Returns:
-        Series or DataFrame with momentum values
-    """
-    # Extract Series from DataFrame if column specified
-    if isinstance(prices, pd.DataFrame) and col_name is not None:
-        if col_name not in prices.columns:
-            raise ValueError(f"Column '{col_name}' not found in DataFrame")
-        price_data = prices[col_name]
-    else:
-        price_data = prices
-    
-    # Calculate momentum based on method
-    if method == 'ratio':
-        momentum = price_data / price_data.shift(window) - 1
-    elif method == 'diff':
-        momentum = price_data - price_data.shift(window)
-    elif method == 'log':
-        momentum = np.log(price_data / price_data.shift(window))
-    else:
-        raise ValueError(f"Invalid momentum method: {method}. Use 'ratio', 'diff', or 'log'")
-    
-    return momentum
-
-
-def calculate_volatility(
-    returns: Union[pd.Series, pd.DataFrame],
-    window: int = 20,
-    annualize: bool = True,
-    trading_days: int = 252,
-    method: str = 'std',
-    col_name: Optional[str] = None
-) -> Union[pd.Series, pd.DataFrame]:
-    """
-    Calculate return volatility.
-    
-    Args:
-        returns: Return data (Series or DataFrame)
-        window: Lookback window for volatility calculation
-        annualize: Whether to annualize the result
-        trading_days: Number of trading days in a year
-        method: Calculation method ('std', 'garch', 'parkinson', etc.)
-        col_name: Column name if returns is a DataFrame
-        
-    Returns:
-        Series or DataFrame with volatility values
-    """
-    # Extract Series from DataFrame if column specified
-    if isinstance(returns, pd.DataFrame) and col_name is not None:
-        if col_name not in returns.columns:
-            raise ValueError(f"Column '{col_name}' not found in DataFrame")
-        return_data = returns[col_name]
-    else:
-        return_data = returns
-    
-    # Calculate volatility
-    if method == 'std':
-        vol = return_data.rolling(window=window).std()
-        
-        # Annualize if requested
-        if annualize:
-            vol = vol * np.sqrt(trading_days)
-    else:
-        # For more complex methods, we could implement or call other modules
-        raise ValueError(f"Volatility method '{method}' not implemented yet. Use 'std'.")
-    
-    return vol
-
 
 #------------------------------------------------------------------------
 # Technical Indicators
@@ -346,83 +216,6 @@ def add_trend_features(
     return result
 
 
-#------------------------------------------------------------------------
-# Statistical Features
-#------------------------------------------------------------------------
-
-def calculate_zscore(
-    series: pd.Series, 
-    window: int = 60,
-    method: str = 'rolling',
-    min_periods: Optional[int] = None
-) -> pd.Series:
-    """
-    Calculate z-score for a time series.
-    
-    Args:
-        series: Time series to calculate z-score for
-        window: Rolling window size
-        method: Method for calculation ('rolling', 'ewm', 'expanding')
-        min_periods: Minimum number of observations required
-        
-    Returns:
-        Series of z-scores
-        
-    Raises:
-        ValueError: If an invalid method is specified
-    """
-    if min_periods is None:
-        min_periods = window // 2
-        
-    # Calculate means and standard deviations
-    if method == 'rolling':
-        rolling_mean = series.rolling(window=window, min_periods=min_periods).mean()
-        rolling_std = series.rolling(window=window, min_periods=min_periods).std()
-        
-        # Replace zero standard deviations with NaN to avoid division by zero
-        rolling_std = rolling_std.replace(0, np.nan)
-        
-        z_score = (series - rolling_mean) / rolling_std
-    
-    elif method == 'ewm':
-        ewma_mean = series.ewm(span=window, min_periods=min_periods).mean()
-        ewma_std = series.ewm(span=window, min_periods=min_periods).std()
-        
-        # Replace zero standard deviations with NaN to avoid division by zero
-        ewma_std = ewma_std.replace(0, np.nan)
-        
-        z_score = (series - ewma_mean) / ewma_std
-    
-    elif method == 'expanding':
-        expanding_mean = series.expanding(min_periods=min_periods).mean()
-        expanding_std = series.expanding(min_periods=min_periods).std()
-        
-        # Replace zero standard deviations with NaN to avoid division by zero
-        expanding_std = expanding_std.replace(0, np.nan)
-        
-        z_score = (series - expanding_mean) / expanding_std
-    
-    elif method == 'regime_adjusted':
-        # First calculate standard rolling z-score
-        z_score = calculate_zscore(series, window, 'rolling', min_periods)
-        
-        # Calculate volatility of volatility (meta-volatility)
-        rolling_std = series.rolling(window=window, min_periods=min_periods).std()
-        vol_window = window * 3  # Longer window for regime detection
-        vol_of_vol = rolling_std.rolling(window=vol_window).std() / rolling_std.rolling(window=vol_window).mean()
-        
-        # Calculate scaling factor (higher volatility periods get downscaled)
-        scaling = 1.0 / np.maximum(1.0, vol_of_vol / vol_of_vol.rolling(window=vol_window).median())
-        
-        # Apply scaling to original z-score
-        z_score = z_score * scaling
-        
-    else:
-        raise ValueError(f"Invalid z-score method: {method}. Use 'rolling', 'ewm', 'expanding', or 'regime_adjusted'")
-    
-    return z_score
-
-
 def add_zscore_features(
     df: pd.DataFrame,
     columns: List[str],
@@ -545,7 +338,7 @@ def add_volatility_features(
     if returns_col not in result.columns:
         if 'close' in result.columns:
             # Calculate returns if not present
-            result[returns_col] = result['close'].pct_change()
+            result[returns_col] = calculate_returns(result['close'], method='pct')
         else:
             raise ValueError(f"Returns column '{returns_col}' not found in DataFrame")
     
@@ -554,11 +347,12 @@ def add_volatility_features(
         for estimator in estimators:
             if estimator == 'standard':
                 # Standard rolling volatility
-                vol = result[returns_col].rolling(window=window).std()
-                
-                # Annualize if requested
-                if annualize:
-                    vol = vol * np.sqrt(trading_days)
+                vol = calculate_volatility(
+                    result[returns_col], 
+                    window=window, 
+                    annualize=annualize, 
+                    trading_days=trading_days
+                )
                 
                 # Apply log transformation if requested
                 if use_log_scale:
@@ -867,9 +661,12 @@ def create_feature_set(
     
     # Add lagged features if requested
     if add_lagged and created_features:
-        for lag in lag_periods:
-            for feature in created_features:
-                result[f"{feature}_lag_{lag}"] = result[feature].shift(lag)
+        result = add_lagged_features(
+            result,
+            columns=created_features,
+            lags=lag_periods,
+            drop_na=False
+        )
     
     # Drop NA values if requested
     if drop_na:
