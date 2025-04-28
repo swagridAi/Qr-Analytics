@@ -212,3 +212,14 @@ class BaseProvider(Generic[T], ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         await self.disconnect()
+
+    async def _transform_to_model(self, 
+                                raw_data: Dict[str, Any], 
+                                model_type: Type[BaseDataModel]) -> BaseDataModel:
+        """Transform raw provider data to standardized model"""
+        # Implementation
+        
+    @abstractmethod
+    async def fetch_data(self, **params) -> AsyncIterator[BaseDataModel]:
+        """Fetch data and return standardized models"""
+        pass
