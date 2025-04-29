@@ -1,0 +1,51 @@
+# configs/crypto_intraday.yaml
+pipeline: crypto_intraday
+description: "Cryptocurrency intraday trading strategy pipeline"
+
+# Data directories
+data_dir: "./data/crypto"
+results_dir: "./results/crypto"
+
+# Provider configuration
+provider:
+  id: "crypto_ccxt"
+  config:
+    name: "binance_data"
+    exchange: "binance"
+    symbols: ["BTC/USDT", "ETH/USDT"]
+    timeframe: "1h"
+  fetch_params:
+    limit: 1000
+    since: "2023-01-01"
+
+# Analytics configuration
+analytics:
+  - name: "volatility"
+    estimator: "yang_zhang"
+    window: 21
+    annualize: true
+  - name: "regime_detector"
+    method: "hmm"
+    n_states: 3
+    features: ["returns", "volatility"]
+  - name: "zscore"
+    window: 60
+    entry_threshold: 2.0
+    exit_threshold: 0.5
+
+# Backtest configuration
+backtest:
+  strategy: "adaptive_regime"
+  strategy_params:
+    vol_scaling: true
+    max_leverage: 1.0
+  risk_params:
+    stop_loss_pct: 2.0
+    max_drawdown_pct: 10.0
+    target_volatility: 0.2
+  fee_model: "fixed"
+  fee_params:
+    commission_pct: 0.001
+  execution_model: "simple"
+  execution_params:
+    slippage_bps: 5
