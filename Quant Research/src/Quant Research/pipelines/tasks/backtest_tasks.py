@@ -5,12 +5,18 @@ This module contains tasks for backtest operations in the pipeline.
 """
 
 from typing import Dict, Any
-from prefect import task
+import os
 
+from quant_research.pipelines.core.task import backtest_task
 from quant_research.backtest.engine import BacktestEngine
 from quant_research.core.storage import load_dataframe
 
-@task
+@backtest_task(
+    name="run_backtest",
+    description="Run a backtest with signals and prices data",
+    retries=1,
+    timeout_seconds=3600  # 1 hour timeout for long backtests
+)
 def run_backtest(
     signals_path: str,
     prices_path: str,
@@ -29,6 +35,9 @@ def run_backtest(
     Returns:
         Backtest metrics
     """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Update config with data paths
     config = backtest_config.copy()
     config["signals_file"] = signals_path

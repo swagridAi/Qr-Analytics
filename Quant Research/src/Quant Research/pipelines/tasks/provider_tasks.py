@@ -6,13 +6,18 @@ This module contains tasks for data provider operations in the pipeline.
 
 from typing import Dict, Any
 import pandas as pd
-from prefect import task
 
+from quant_research.pipelines.core.task import provider_task
 from quant_research.providers import ProviderFactory
 from quant_research.core.models import PriceBar
 from quant_research.core.storage import save_dataframe
 
-@task
+@provider_task(
+    name="fetch_market_data",
+    description="Fetch market data from a provider and save to storage",
+    retries=3,
+    retry_delay_seconds=60
+)
 async def fetch_market_data(
     provider_id: str,
     config: Dict[str, Any],
@@ -53,8 +58,11 @@ async def fetch_market_data(
             # Save data
             save_dataframe(df, output_path)
         else:
-            # Save empty DataFrame
-            save_dataframe(pd.DataFrame(), output_path)
+            # Save empty DataFrame with appropriate schema
+            empty_df = pd.DataFrame(columns=[
+                'timestamp', 'symbol', 'open', 'high', 'low', 'close', 'volume'
+            ])
+            save_dataframe(empty_df, output_path)
         
         return output_path
     finally:
