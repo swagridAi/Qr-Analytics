@@ -44,10 +44,3 @@ papermill notebooks/validation/template_report.ipynb -p strat new_strategy …
 nbconvert --to pdf … → place in docs/reports/.
 
 Add a bullet to docs/README_validation.md summarising Sharpe, max-DD, p-values.
-
-7 Security & ethics
-Obey upstream API ToS (see docs/data_governance.md).
-
-No personal data scraping beyond permitted endpoints.
-
-Flag rate-limit risks and include exponential-backoff logic.
