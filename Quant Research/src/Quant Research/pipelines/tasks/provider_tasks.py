@@ -1,6 +1,10 @@
-# pipelines/tasks/provider_tasks.py
-import asyncio
-from typing import Dict, List, Any
+"""
+Provider tasks for pipeline workflows.
+
+This module contains tasks for data provider operations in the pipeline.
+"""
+
+from typing import Dict, Any
 import pandas as pd
 from prefect import task
 
@@ -40,13 +44,17 @@ async def fetch_market_data(
             data_points.append(data_point)
         
         # Convert to DataFrame
-        if isinstance(data_points[0], PriceBar):
-            df = pd.DataFrame([p.dict() for p in data_points])
+        if len(data_points) > 0:
+            if isinstance(data_points[0], PriceBar):
+                df = pd.DataFrame([p.dict() for p in data_points])
+            else:
+                df = pd.DataFrame(data_points)
+            
+            # Save data
+            save_dataframe(df, output_path)
         else:
-            df = pd.DataFrame(data_points)
-        
-        # Save data
-        save_dataframe(df, output_path)
+            # Save empty DataFrame
+            save_dataframe(pd.DataFrame(), output_path)
         
         return output_path
     finally:

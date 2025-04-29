@@ -1,6 +1,10 @@
-# pipelines/tasks/backtest_tasks.py
+"""
+Backtest tasks for pipeline workflows.
+
+This module contains tasks for backtest operations in the pipeline.
+"""
+
 from typing import Dict, Any
-import json
 from prefect import task
 
 from quant_research.backtest.engine import BacktestEngine
